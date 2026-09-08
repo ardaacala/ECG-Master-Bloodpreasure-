@@ -3,15 +3,21 @@
 // Master bir erisim noktasi acar. Slave kodu daha sonra ayni SSID, parola ve
 // TCP portunu kullanacak.
 #define WIFI_AP_SSID "ECG_MASTER"
-#define WIFI_AP_PASSWORD "ecgmaster123"
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+// Public-repository fallback. Copy secrets.example.h to secrets.h and set the
+// same password in the slave firmware before using real hardware.
+#define WIFI_AP_PASSWORD "CHANGE_ME"
+#endif
 #define WIFI_TCP_PORT 3333
 #define MAX_WIFI_CLIENTS 8
 #define MIN_READY_NODES 2
 
-// Karma sistem: Slave 1 Wi-Fi (DEVICE_ID=1), Slave 2 BLE'dir.
+// Karma sistem: bir slave Wi-Fi, GPIO4 active-low slave BLE'dir.
 #define WIFI_NODE_ID 1
 #define BLE_NODE_ID 2
-#define BLE_NODE_NAME "LED_NODE_2"
+#define BLE_NODE_NAME "LED_NODE_1"
 
 #define SYSTOLIC 120
 #define DIASTOLIC 80

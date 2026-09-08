@@ -121,11 +121,13 @@ static void handlePacket(uint8_t index, const uint8_t *data, size_t length) {
         ClientRuntime *existing = deviceMap[hello.deviceId];
         if (existing && existing != &node && existing->active &&
             existing->client.connected()) {
-            Serial.printf("[DUPLICATE DEVICE_ID] ID:%u NAME:%s conflicts with active NAME:%s; new connection rejected\n",
+            // More than one physical output may intentionally use the same
+            // logical ID. Keep both transport slots alive; broadcasts are
+            // delivered to every synced slot. deviceMap below points at the
+            // newest one only for explicitly targeted commands.
+            Serial.printf("[DEVICE] ID:%u NAME:%s shares logical ID with NAME:%s\n",
                           hello.deviceId, hello.deviceName,
                           existing->deviceName);
-            disconnectClient(index);
-            return;
         }
         if (node.deviceId != 0 && node.deviceId != hello.deviceId &&
             deviceMap[node.deviceId] == &node) {
@@ -446,13 +448,16 @@ void wifiMasterPublishUi() {
 
 WifiNodeStatus wifiNodeStatus(uint8_t deviceId) {
     WifiNodeStatus result{};
-    ClientRuntime *node = deviceMap[deviceId];
-    if (!node || !node->active || !node->client.connected()) return result;
-    result.connected = true;
-    result.synced = node->synced && node->quality < 3;
-    result.rttUs = node->lastRttUs > 0 ? (uint32_t)node->lastRttUs : 0;
-    result.jitterUs = node->jitterUs > 0 ? (uint32_t)node->jitterUs : 0;
-    result.rssiDbm = node->rssiDbm;
+    if (deviceId != WIFI_NODE_ID) return result;
+    // UI runs on the other core. Never call WiFiClient::connected() or touch
+    // deviceMap from that task: lwIP/client locks can stall rendering for
+    // hundreds of milliseconds. The network task publishes this lock-free
+    // snapshot once per tick instead.
+    result.connected = publishedConnected > 0;
+    result.synced = publishedSynced > 0;
+    result.rttUs = publishedRttUs;
+    result.jitterUs = publishedJitterUs;
+    result.rssiDbm = publishedWorstRssi;
     return result;
 }
 

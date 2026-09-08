@@ -1,20 +1,17 @@
-# PlatformIO
 .pio/
-.pioenvs/
-.piolibdeps/
-
-# VS Code / local IDE
+*/.pio/
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Python/cache
-__pycache__/
-*.pyc
-
-# Logs / temporary
 *.log
-*.tmp
+*.pyc
+__pycache__/
+
+# Local recovery/debug artifacts; never part of the firmware source.
+.codex_*
+
+# PlatformIO local overrides may contain machine-specific COM ports.
+platformio_override.ini
+include/secrets.h
+slave1_wifi/include/secrets.h

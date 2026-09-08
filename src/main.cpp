@@ -1,108 +1,1084 @@
+/* Live cuff-pressure gauge for a conditioned 0-40 kPa analog sensor.
+ * Sensor output: nominally 0.2-2.7 V at a 3.3 V supply. */
 #include <Arduino.h>
+#include <Arduino_GFX_Library.h>
+#include <Wire.h>
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
+#include <Preferences.h>
 #include "config.h"
 #include "protocol.h"
-#include "ui.h"
-#include "fake_ecg.h"
-#include "event_scheduler.h"
 #include "wifi_master.h"
 #include "ble_master.h"
 
-static int64_t masterTimeUs() { return esp_timer_get_time(); }
-static uint32_t eventId = 0;
+// The active 466x466 round Waveshare board routes its onboard BAT_ADC divider
+// to GPIO4. The external conditioned pressure sensor remains on GPIO2.
+constexpr uint8_t BATTERY_ADC_PIN = 4;
+constexpr uint8_t PRESSURE_ADC_PIN = 2;
+// Waveshare's official ADC example for this 1.43-inch board reads ADC1
+// channel 3 (GPIO4) and multiplies the ADC-side voltage by 3.
+constexpr float BATTERY_DIVIDER_RATIO = 3.0f;
+constexpr uint32_t BATTERY_UPDATE_MS = 5000;
+constexpr uint8_t BATTERY_SAMPLE_COUNT = 32;
+constexpr uint16_t ADC_RESOLUTION_MAX = 4095;
+constexpr uint16_t SENSOR_NOMINAL_ZERO_MV = 200;
+constexpr uint16_t SENSOR_ZERO_MIN_VALID_MV = 100;
+constexpr uint16_t SENSOR_ZERO_MAX_VALID_MV = 450;
+// Change only this value if the measured full-scale output is not 2.700 V.
+constexpr uint16_t SENSOR_FULL_SCALE_MV = 2700;
+constexpr float SENSOR_FULL_SCALE_KPA = 40.0f;
+constexpr float KPA_TO_MMHG = 7.50061683f;
+constexpr float SENSOR_FULL_SCALE_MMHG =
+    SENSOR_FULL_SCALE_KPA * KPA_TO_MMHG;
+// Reference comparison showed roughly 10 mmHg under-reading around 50 mmHg
+// and 20 mmHg around 100 mmHg. A gain correction preserves the zero point and
+// avoids the discontinuity that a +10/+20 piecewise offset would create.
+constexpr float PRESSURE_GAIN_CORRECTION = 1.20f;
+constexpr float GAUGE_MAX_MMHG = 300.0f;
+constexpr uint16_t ADC_SAMPLE_HZ = 500;
+constexpr uint32_t ADC_SAMPLE_PERIOD_US = 1000000UL / ADC_SAMPLE_HZ;
+constexpr uint16_t UI_REFRESH_HZ = 30;
+constexpr uint32_t UI_FRAME_PERIOD_US = 1000000UL / UI_REFRESH_HZ;
+constexpr uint16_t PULSE_LED_ON_MS = 150;
+// Ignore brief ADC excursions around the configured pressure boundaries.
+// The beat timeline keeps running during this window, so boundary noise
+// cannot turn 30 BPM into rapid restarts or make 200 BPM appear very slow.
+constexpr uint16_t FAKE_RANGE_EXIT_DEBOUNCE_MS = 300;
+// The measured cuff oscillations are typically only a few tenths of a mmHg.
+// Keep the simulator in that range instead of drawing an exaggerated 2 mmHg
+// pressure excursion.
+constexpr float FAKE_PULSE_AMPLITUDE_MMHG = 0.6f;
+constexpr uint16_t DEFAULT_FAKE_BPM = 72;
+constexpr uint16_t DEFAULT_FAKE_MAX_PRESSURE_MMHG = 130;
+constexpr uint16_t DEFAULT_FAKE_MIN_PRESSURE_MMHG = 30;
+// Shared by real, synthetic and phone-triggered beats. 220 ms still permits
+// the configured maximum of 240 BPM (250 ms period) while rejecting a second
+// event created during a real/synthetic handover or repeated BLE write.
+// Global transport/phone de-duplication. 200 ms permits 240 BPM (250 ms
+// period), while the real cuff detector retains its separate 500 ms lock.
+constexpr uint32_t MIN_TRIGGER_INTERVAL_MS = 200;
+// A changing transport lead shifts executeAt between beats and can make a
+// valid beat collide with the global duplicate guard. Use one conservative
+// lead for every event so the physical/UI cadence remains exactly BPM-based.
+constexpr uint32_t FIXED_TRIGGER_LEAD_US = 600000;
+// A cuff oscillation can contain a reflected/dicrotic second positive lobe.
+// Keep the real detector refractory long enough not to count that lobe as a
+// second heartbeat. 500 ms still supports heart rates up to 120 BPM.
+constexpr uint16_t WARMUP_SAMPLE_COUNT = 125;
+constexpr uint16_t ZERO_SAMPLE_COUNT = 250;
+constexpr uint8_t LCD_CS = 9, LCD_PCLK = 10, LCD_D0 = 11, LCD_D1 = 12;
+constexpr uint8_t LCD_D2 = 13, LCD_D3 = 14, LCD_RST = 21;
+// FT3168/FT6146 touch controller and QMI8658 share this onboard I2C bus.
+// Only the touch address is accessed here; the IMU wiring is left untouched.
+constexpr uint8_t TOUCH_SDA_PIN = 47, TOUCH_SCL_PIN = 48;
+constexpr uint8_t TOUCH_I2C_ADDRESS = 0x38;
+constexpr int16_t SWIPE_MIN_DISTANCE = 70;
+constexpr uint16_t SWIPE_MAX_DURATION_MS = 1000;
+constexpr uint16_t SCREEN_HOLD_TOGGLE_MS = 2000;
+constexpr int16_t SCREEN_W = 466, SCREEN_H = 466;
 
-struct AckPair {
-    uint32_t eventId;
-    bool wifiReceived;
-    bool bleReceived;
-    int64_t wifiAtUs;
-    int64_t bleAtUs;
-};
-static AckPair ackPairs[16] = {};
-static uint32_t lastStatusPublishMs = 0;
-static uint32_t lastCrossLatencyPublishMs = 0;
+Arduino_DataBus *bus = nullptr;
+Arduino_GFX *display = nullptr;
+Arduino_Canvas *canvas = nullptr;
+uint16_t *backgroundPixels = nullptr;
+uint16_t *dirtyPixels = nullptr;
+int64_t zeroRawSum = 0;
+int64_t zeroMilliVoltsSum = 0;
+int32_t zeroRaw = 0;
+uint32_t zeroMilliVolts = SENSOR_NOMINAL_ZERO_MV;
+uint16_t warmupSamples = 0;
+volatile uint16_t zeroSamples = 0;
+volatile int32_t latestRaw = 0;
+volatile uint32_t latestMilliVolts = 0;
+volatile bool adcSaturated = false;
+volatile float targetPressure = 0.0f;
+volatile float displayedGaugeBasePressure = 0.0f;
+volatile float fakePressureOffset = 0.0f;
+volatile uint16_t fakeBpm = DEFAULT_FAKE_BPM;
+volatile uint16_t fakeMaxPressureMmHg = DEFAULT_FAKE_MAX_PRESSURE_MMHG;
+volatile uint16_t fakeMinPressureMmHg = DEFAULT_FAKE_MIN_PRESSURE_MMHG;
+volatile uint32_t fakeBpmRevision = 0;
+// Incremented only when the configured upper pressure boundary is crossed.
+// The UI uses it to discard an event that may already have become visible.
+volatile uint32_t fakeUiUpperCancelRevision = 0;
+volatile bool fakePulseMode = false;
+volatile uint32_t visiblePulseCount = 0;
+volatile uint16_t measuredSps = 0;
+volatile uint16_t measuredUiFps = 0;
+volatile uint32_t lastUiFrameMs = 0;
+volatile uint16_t maxUiDrawMs = 0;
+volatile uint16_t batteryVoltageMv = 0;
+volatile uint8_t batteryPercent = 0;
+volatile bool batteryReadingValid = false;
+volatile bool darkTheme = false;
+volatile uint32_t themeRevision = 0;
+volatile bool requestedScreenOn = true;
+volatile uint32_t screenPowerRevision = 0;
+bool touchAvailable = false;
+uint32_t lastSerialMs = 0;
+float lastNeedlePressure = -1.0f;
+uint32_t networkEventId = 0;
+int64_t lastTriggerExecuteAtUs = 0;
+portMUX_TYPE triggerMux = portMUX_INITIALIZER_UNLOCKED;
+TaskHandle_t uiTaskHandle = nullptr;
 
-static bool mixedSystemReady() {
-    const WifiNodeStatus wifi = wifiNodeStatus(WIFI_NODE_ID);
-    const BleNodeStatus ble = bleNodeStatus();
-    return wifi.synced && ble.synced;
+uint8_t batteryPercentFromMillivolts(uint16_t millivolts) {
+    struct BatteryPoint { uint16_t mv; uint8_t percent; };
+    static constexpr BatteryPoint curve[] = {
+        {3200, 0}, {3300, 5}, {3500, 10}, {3600, 20}, {3700, 35},
+        {3800, 50}, {3900, 65}, {4000, 80}, {4100, 90}, {4200, 100}
+    };
+    if (millivolts <= curve[0].mv) return 0;
+    constexpr size_t count = sizeof(curve) / sizeof(curve[0]);
+    if (millivolts >= curve[count - 1].mv) return 100;
+    for (size_t i = 1; i < count; ++i) {
+        if (millivolts <= curve[i].mv) {
+            const uint16_t spanMv = curve[i].mv - curve[i - 1].mv;
+            const uint16_t offsetMv = millivolts - curve[i - 1].mv;
+            const uint8_t spanPercent = curve[i].percent - curve[i - 1].percent;
+            return constrain((int)curve[i - 1].percent +
+                                 (int)offsetMv * spanPercent / spanMv,
+                             0, 100);
+        }
+    }
+    return 0;
 }
 
-static bool sendTrigger(const EcgEvent &source) {
-    if (!mixedSystemReady()) return false;
-    const uint32_t leadUs = max(wifiRecommendedLeadUs(), bleRecommendedLeadUs());
-    const uint32_t duration = source.type == PULSE_LARGE ? LARGE_PULSE_DURATION_US : SMALL_PULSE_DURATION_US;
-    ScheduledEvent event{++eventId, source.type, source.targetMask,
-                         source.atUs + leadUs, duration};
-    TriggerPacket packet{MSG_TRIGGER, event.eventId, (uint8_t)source.type, source.targetMask,
-                         event.executeAtMasterUs, duration};
-    const bool wifiOk = wifiSendTrigger(packet);
-    const bool bleOk = bleSendTrigger(packet);
-    if (!wifiOk || !bleOk || !schedulerAdd(event)) return false;
+void updateBatteryMeasurement() {
+    uint32_t adcMillivoltSum = 0;
+    for (uint8_t i = 0; i < BATTERY_SAMPLE_COUNT; ++i) {
+        adcMillivoltSum += analogReadMilliVolts(BATTERY_ADC_PIN);
+    }
+    const float measuredBatteryMv =
+        ((float)adcMillivoltSum / BATTERY_SAMPLE_COUNT) *
+        BATTERY_DIVIDER_RATIO;
+    static float filteredBatteryMv = 0.0f;
+    filteredBatteryMv = filteredBatteryMv == 0.0f
+                            ? measuredBatteryMv
+                            : filteredBatteryMv * 0.80f +
+                                  measuredBatteryMv * 0.20f;
+    const uint16_t publishedMv = (uint16_t)constrain(
+        lroundf(filteredBatteryMv), 0L, 5000L);
+    batteryVoltageMv = publishedMv;
+    batteryPercent = batteryPercentFromMillivolts(publishedMv);
+    // A disconnected divider is near zero. USB/charging may make the voltage
+    // rise; percentage remains clamped by the lookup-table endpoints.
+    batteryReadingValid = publishedMv >= 2500;
+}
+
+bool sendPulseTrigger(PulseType pulseType = PULSE_LARGE,
+                      uint64_t targetMask = 0,
+                      int64_t *executeAtResultUs = nullptr,
+                      uint32_t *eventIdResult = nullptr) {
+    const int64_t executeAtUs = esp_timer_get_time() +
+                                FIXED_TRIGGER_LEAD_US;
+    uint32_t eventId = 0;
+    bool accepted = false;
+    portENTER_CRITICAL(&triggerMux);
+    if (lastTriggerExecuteAtUs == 0 ||
+        executeAtUs - lastTriggerExecuteAtUs >=
+            (int64_t)MIN_TRIGGER_INTERVAL_MS * 1000) {
+        lastTriggerExecuteAtUs = executeAtUs;
+        eventId = ++networkEventId;
+        accepted = true;
+    }
+    portEXIT_CRITICAL(&triggerMux);
+    if (!accepted) {
+        Serial.println("[PULSE TRIGGER] duplicate suppressed");
+        return false;
+    }
+
+    if (executeAtResultUs) *executeAtResultUs = executeAtUs;
+    if (eventIdResult) *eventIdResult = eventId;
+    const uint32_t durationUs = pulseType == PULSE_SMALL
+                                    ? SMALL_PULSE_DURATION_US
+                                    : LARGE_PULSE_DURATION_US;
+    const TriggerPacket packet{MSG_TRIGGER, eventId, pulseType,
+                               targetMask, executeAtUs, durationUs};
+    const bool wifiQueued = wifiSendTrigger(packet);
+    const bool bleQueued = bleSendTrigger(packet);
+    Serial.printf("[PULSE TRIGGER] #%lu wifi=%u ble=%u at=%lld\n",
+                  (unsigned long)eventId, wifiQueued ? 1U : 0U,
+                  bleQueued ? 1U : 0U, (long long)executeAtUs);
+    blePublishPhoneResult(packet.eventId, wifiQueued, bleQueued);
     return true;
 }
 
-static void recordAck(uint32_t id, bool fromWifi, int64_t actualMasterUs) {
-    AckPair &pair = ackPairs[id % 16];
-    if (pair.eventId != id) pair = {id, false, false, 0, 0};
-    if (fromWifi) { pair.wifiReceived = true; pair.wifiAtUs = actualMasterUs; }
-    else { pair.bleReceived = true; pair.bleAtUs = actualMasterUs; }
-    if (pair.wifiReceived && pair.bleReceived) {
-        const uint32_t nowMs = millis();
-        if (nowMs - lastCrossLatencyPublishMs >= UI_STATUS_INTERVAL_MS) {
-            lastCrossLatencyPublishMs = nowMs;
-            uiSetCrossTransportLatency(pair.bleAtUs - pair.wifiAtUs, true);
-        }
-#if ENABLE_VERBOSE_TIMING_LOGS
-        Serial.printf("[MIXED ACK] #%lu BLE-WIFI:%+lld us\n",
-                      (unsigned long)id,
-                      (long long)(pair.bleAtUs - pair.wifiAtUs));
-#endif
-        pair.wifiReceived = pair.bleReceived = false;
+constexpr int16_t GAUGE_CX = SCREEN_W / 2;
+constexpr int16_t GAUGE_CY = SCREEN_H / 2;
+constexpr int16_t NEEDLE_RADIUS = 158;
+constexpr int16_t PULSE_LED_CX = GAUGE_CX;
+constexpr int16_t PULSE_LED_CY = 414;
+constexpr int16_t PULSE_LED_RADIUS = 16;
+
+void pointOnGauge(float pressure, int16_t radius, int16_t &x, int16_t &y) {
+    pressure = constrain(pressure, 0.0f, GAUGE_MAX_MMHG);
+    const float angle = (120.0f + pressure) * DEG_TO_RAD;
+    x = GAUGE_CX + (int16_t)lroundf(cosf(angle) * radius);
+    y = GAUGE_CY + (int16_t)lroundf(sinf(angle) * radius);
+}
+
+void drawThickLine(Arduino_GFX *gfx, int16_t x0, int16_t y0,
+                   int16_t x1, int16_t y1, uint16_t color, uint8_t width) {
+    const float dx = x1 - x0, dy = y1 - y0;
+    const float length = sqrtf(dx * dx + dy * dy);
+    if (length < 1.0f) return;
+    const float ox = -dy / length, oy = dx / length;
+    const int half = width / 2;
+    for (int i = -half; i <= half; ++i) {
+        gfx->drawLine(x0 + lroundf(ox * i), y0 + lroundf(oy * i),
+                      x1 + lroundf(ox * i), y1 + lroundf(oy * i), color);
     }
 }
 
-static void publishMixedStatus() {
+void drawPulseLed(Arduino_GFX *gfx, bool on) {
+    const uint16_t bezel = gfx->color565(24, 24, 24);
+    const uint16_t rim = gfx->color565(92, 92, 92);
+    const uint16_t offColor = gfx->color565(58, 8, 10);
+    const uint16_t onColor = gfx->color565(255, 24, 36);
+    const uint16_t highlight = gfx->color565(255, 178, 178);
+
+    gfx->fillCircle(PULSE_LED_CX, PULSE_LED_CY, PULSE_LED_RADIUS + 4, bezel);
+    gfx->fillCircle(PULSE_LED_CX, PULSE_LED_CY, PULSE_LED_RADIUS + 1, rim);
+    gfx->fillCircle(PULSE_LED_CX, PULSE_LED_CY, PULSE_LED_RADIUS,
+                    on ? onColor : offColor);
+    if (on) {
+        gfx->fillCircle(PULSE_LED_CX - 5, PULSE_LED_CY - 5, 4, highlight);
+    }
+}
+
+void drawStaticGauge() {
+    const bool dark = darkTheme;
+    const uint16_t outer = canvas->color565(dark ? 0 : 18,
+                                             dark ? 0 : 18,
+                                             dark ? 0 : 18);
+    const uint16_t face = canvas->color565(dark ? 5 : 244,
+                                            dark ? 7 : 240,
+                                            dark ? 9 : 230);
+    const uint16_t ink = canvas->color565(dark ? 225 : 18,
+                                           dark ? 228 : 18,
+                                           dark ? 232 : 18);
+    canvas->fillScreen(outer);
+    canvas->fillCircle(GAUGE_CX, GAUGE_CY, 225, face);
+    for (int r = 218; r <= 225; ++r) canvas->drawCircle(GAUGE_CX, GAUGE_CY, r, ink);
+
+    for (int i = 0; i <= 60; ++i) {
+        const float pressure = i * 5.0f;
+        const bool major = (i % 4) == 0;
+        int16_t xo, yo, xi, yi;
+        pointOnGauge(pressure, 207, xo, yo);
+        pointOnGauge(pressure, major ? 177 : 190, xi, yi);
+        drawThickLine(canvas, xi, yi, xo, yo, ink, major ? 5 : 2);
+
+        if (major) {
+            int16_t tx, ty, x1, y1;
+            uint16_t tw, th;
+            pointOnGauge(pressure, 151, tx, ty);
+            char label[8];
+            snprintf(label, sizeof(label), "%d", (int)pressure);
+            canvas->setTextSize(2);
+            canvas->setTextColor(ink);
+            canvas->getTextBounds(label, 0, 0, &x1, &y1, &tw, &th);
+            canvas->setCursor(tx - tw / 2, ty - th / 2);
+            canvas->print(label);
+        }
+    }
+    drawPulseLed(canvas, false);
+}
+
+bool readTouchPoint(int16_t &x, int16_t &y, bool &pressed) {
+    if (!touchAvailable) return false;
+    Wire.beginTransmission(TOUCH_I2C_ADDRESS);
+    Wire.write((uint8_t)0x02); // number of points, then first point coordinates
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom(TOUCH_I2C_ADDRESS, (uint8_t)5) != 5) return false;
+    const uint8_t points = Wire.read() & 0x0f;
+    const uint8_t xh = Wire.read();
+    const uint8_t xl = Wire.read();
+    const uint8_t yh = Wire.read();
+    const uint8_t yl = Wire.read();
+    pressed = points > 0;
+    if (pressed) {
+        x = ((xh & 0x0f) << 8) | xl;
+        y = ((yh & 0x0f) << 8) | yl;
+    }
+    return true;
+}
+
+void updateTouchGesture() {
+    static bool tracking = false;
+    static bool holdHandled = false;
+    static int16_t startX = 0, startY = 0;
+    static int16_t lastX = 0, lastY = 0;
+    static uint32_t startedMs = 0;
+    static uint32_t lastPollMs = 0;
     const uint32_t nowMs = millis();
-    if (nowMs - lastStatusPublishMs < UI_STATUS_INTERVAL_MS) return;
-    lastStatusPublishMs = nowMs;
+    if (nowMs - lastPollMs < 12) return;
+    lastPollMs = nowMs;
+
+    int16_t x = 0, y = 0;
+    bool pressed = false;
+    if (!readTouchPoint(x, y, pressed)) {
+        tracking = false;
+        return;
+    }
+    if (pressed) {
+        if (!tracking) {
+            tracking = true;
+            holdHandled = false;
+            startX = lastX = x;
+            startY = lastY = y;
+            startedMs = nowMs;
+        } else {
+            lastX = x;
+            lastY = y;
+        }
+        if (!holdHandled && nowMs - startedMs >= SCREEN_HOLD_TOGGLE_MS) {
+            holdHandled = true;
+            requestedScreenOn = !requestedScreenOn;
+            screenPowerRevision = screenPowerRevision + 1;
+            if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
+            Serial.printf("[UI] screen=%s\n",
+                          requestedScreenOn ? "on" : "off");
+        }
+        return;
+    }
+    if (!tracking) return;
+    tracking = false;
+    // Do not interpret the release of a completed long press as a swipe.
+    if (holdHandled) return;
+    const int16_t dx = lastX - startX;
+    const int16_t dy = lastY - startY;
+    if (nowMs - startedMs > SWIPE_MAX_DURATION_MS ||
+        abs(dx) < SWIPE_MIN_DISTANCE || abs(dx) <= abs(dy)) return;
+
+    // Light: right-to-left enters dark mode. Dark: left-to-right returns.
+    const bool requestedDark = dx < 0;
+    if (requestedDark == darkTheme) return;
+    darkTheme = requestedDark;
+    themeRevision = themeRevision + 1;
+    if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
+    Serial.printf("[UI] theme=%s\n", requestedDark ? "dark" : "light");
+}
+
+bool beginUi() {
+    bus = new Arduino_ESP32QSPI(LCD_CS, LCD_PCLK, LCD_D0, LCD_D1, LCD_D2, LCD_D3, false);
+    display = new Arduino_CO5300(bus, LCD_RST, 0, SCREEN_W, SCREEN_H, 6, 0, 6, 0);
+    if (!display || !display->begin(80000000)) return false;
+    canvas = new Arduino_Canvas(SCREEN_W, SCREEN_H, display);
+    if (!canvas || !canvas->begin(GFX_SKIP_OUTPUT_BEGIN)) return false;
+    const size_t frameBytes = (size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t);
+    backgroundPixels = static_cast<uint16_t *>(
+        heap_caps_malloc(frameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    dirtyPixels = static_cast<uint16_t *>(
+        heap_caps_malloc(frameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!backgroundPixels || !dirtyPixels) return false;
+
+    drawStaticGauge();
+    canvas->flush();
+    memcpy(backgroundPixels, canvas->getFramebuffer(), frameBytes);
+    return true;
+}
+
+#if 0  // Real cuff-pulse detection removed; synthetic BPM is the only source.
+void updatePulseDetector(float pressure, bool saturated, uint32_t nowMs) {
+    // Detection filtering is separate from the needle path: the needle still
+    // receives the unfiltered scaled sample. This extracts only the short AC
+    // cuff oscillation riding on top of the slowly changing cuff pressure.
+    static bool initialized = false;
+    static bool candidateActive = false;
+    static bool waitingForRearm = false;
+    static uint32_t initializedAtMs = 0;
+    static uint32_t lastSampleMs = 0;
+    static uint32_t trendStartedMs = 0;
+    static uint32_t candidateStartedMs = 0;
+    static uint32_t lastPulseMs = 0;
+    static uint32_t rearmStartedMs = 0;
+    static float baseline = 0.0f;
+    static float filteredOscillation = 0.0f;
+    static float trendReference = 0.0f;
+    static float trendRate = 99.0f;
+    static float candidatePeak = 0.0f;
+
+    // No useful pulse decision at very low cuff pressure or while the ADC is
+    // clipped. Re-arm from the current level after pressure becomes valid.
+    if (pressure < 20.0f || saturated) {
+        initialized = false;
+        candidateActive = false;
+        waitingForRearm = false;
+        return;
+    }
+
+    if (!initialized) {
+        initialized = true;
+        initializedAtMs = nowMs;
+        lastSampleMs = nowMs;
+        trendStartedMs = nowMs;
+        baseline = pressure;
+        trendReference = pressure;
+        trendRate = 99.0f;
+        filteredOscillation = 0.0f;
+        candidateActive = false;
+        waitingForRearm = false;
+        return;
+    }
+
+    float dt = (nowMs - lastSampleMs) * 0.001f;
+    lastSampleMs = nowMs;
+    dt = constrain(dt, 0.001f, 0.100f);
+
+    // About 0.35 Hz high-pass followed by an 8 Hz low-pass. This follows slow
+    // cuff drift but retains the heartbeat band at the 500 SPS ADC rate.
+    constexpr float baselineTauSeconds = 0.455f;
+    constexpr float lowPassTauSeconds = 0.020f;
+    baseline += (dt / (baselineTauSeconds + dt)) * (pressure - baseline);
+    const float oscillation = pressure - baseline;
+    filteredOscillation += (dt / (lowPassTauSeconds + dt)) *
+                           (oscillation - filteredOscillation);
+
+    const uint32_t trendElapsedMs = nowMs - trendStartedMs;
+    if (trendElapsedMs >= 500) {
+        trendRate = (baseline - trendReference) * 1000.0f / trendElapsedMs;
+        trendReference = baseline;
+        trendStartedMs = nowMs;
+    }
+
+    // Wait for inflation/deflation to settle. A locked cuff should have only a
+    // small baseline drift; a pump or open valve is rejected here.
+    const bool pressureHeld = nowMs - initializedAtMs >= 800 &&
+                              fabsf(trendRate) <= 3.0f;
+
+    // Do not let a reflected second positive lobe re-open a candidate. Wait
+    // for the waveform to cross below its baseline first. The timeout avoids
+    // getting stuck if a very asymmetric pulse never quite crosses zero.
+    if (waitingForRearm) {
+        if (filteredOscillation <= -0.03f ||
+            nowMs - rearmStartedMs >= 700) {
+            waitingForRearm = false;
+        }
+        return;
+    }
+
+    if (!candidateActive) {
+        if (pressureHeld &&
+            filteredOscillation >= PULSE_MIN_AMPLITUDE_MMHG &&
+            filteredOscillation <= PULSE_MAX_AMPLITUDE_MMHG) {
+            candidateActive = true;
+            candidateStartedMs = nowMs;
+            candidatePeak = filteredOscillation;
+        }
+        return;
+    }
+
+    candidatePeak = max(candidatePeak, filteredOscillation);
+    const uint32_t candidateAgeMs = nowMs - candidateStartedMs;
+
+    if (!pressureHeld || candidatePeak > PULSE_MAX_AMPLITUDE_MMHG ||
+        candidateAgeMs > 900) {
+        candidateActive = false;
+        return;
+    }
+
+    const float returnThreshold = max(0.04f, candidatePeak * 0.25f);
+    const bool returnedToBaseline = filteredOscillation <= returnThreshold;
+    if (candidateAgeMs >= 80 && returnedToBaseline) {
+        if (nowMs - lastPulseMs >= REAL_PULSE_REFRACTORY_MS) {
+            lastPulseMs = nowMs;
+            lastPulseAmplitude = candidatePeak;
+            lastRealPulseMs = nowMs;
+            fakePressureOffset = 0.0f;
+            fakePulseMode = false;
+            detectedPulseCount = detectedPulseCount + 1;
+            if (sendPulseTrigger()) {
+                visiblePulseCount = visiblePulseCount + 1;
+                if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
+            }
+            waitingForRearm = true;
+            rearmStartedMs = nowMs;
+        }
+        candidateActive = false;
+    }
+}
+#endif
+
+void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
+    constexpr uint8_t DISPLAY_PULSE_QUEUE_SIZE = 8;
+    static uint32_t nextBeatMs = 0;
+    static uint32_t outOfRangeSinceMs = 0;
+    static uint32_t appliedBpmRevision = 0;
+    static int64_t scheduledDisplayUs[DISPLAY_PULSE_QUEUE_SIZE] = {};
+    static uint8_t displayHead = 0;
+    static uint8_t displayCount = 0;
+    static int64_t displayedBeatAtUs = 0;
+    static bool rangeActive = false;
+
+    const auto clearScheduledDisplay = [&]() {
+        displayHead = 0;
+        displayCount = 0;
+        displayedBeatAtUs = 0;
+    };
+
+    if (appliedBpmRevision != fakeBpmRevision) {
+        appliedBpmRevision = fakeBpmRevision;
+        nextBeatMs = 0;
+        outOfRangeSinceMs = 0;
+        rangeActive = false;
+        clearScheduledDisplay();
+        fakePressureOffset = 0.0f;
+    }
+
+    // The lower boundary is exclusive; the upper boundary is inclusive.
+    const bool rawPressureInRange = !saturated &&
+        realPressure > (float)fakeMinPressureMmHg &&
+        realPressure <= (float)fakeMaxPressureMmHg;
+    if (!rangeActive) {
+        if (!rawPressureInRange) {
+            fakePressureOffset = 0.0f;
+            fakePulseMode = false;
+            return;
+        }
+        // Entering the configured range starts the first trigger immediately.
+        rangeActive = true;
+        outOfRangeSinceMs = 0;
+        nextBeatMs = nowMs;
+        fakePulseMode = true;
+    } else if (rawPressureInRange) {
+        outOfRangeSinceMs = 0;
+    } else {
+        if (outOfRangeSinceMs == 0) outOfRangeSinceMs = nowMs;
+        if (nowMs - outOfRangeSinceMs >= FAKE_RANGE_EXIT_DEBOUNCE_MS) {
+            const bool exitedAboveUpper =
+                realPressure > (float)fakeMaxPressureMmHg || saturated;
+            rangeActive = false;
+            outOfRangeSinceMs = 0;
+            nextBeatMs = 0;
+            clearScheduledDisplay();
+            fakePressureOffset = 0.0f;
+            fakePulseMode = false;
+            if (exitedAboveUpper) {
+                // Cancel a UI event already queued for the old valid range.
+                fakeUiUpperCancelRevision = fakeUiUpperCancelRevision + 1;
+            }
+            return;
+        }
+    }
+
+    const uint16_t bpm = constrain((uint16_t)fakeBpm,
+                                   (uint16_t)30, (uint16_t)240);
+    const uint32_t periodMs = 60000UL / bpm;
+    const int64_t nowUs = esp_timer_get_time();
+    if (nextBeatMs == 0) nextBeatMs = nowMs;
+    if ((int32_t)(nowMs - nextBeatMs) >= 0) {
+        nextBeatMs += periodMs;
+        if ((int32_t)(nowMs - nextBeatMs) >= 0) nextBeatMs = nowMs + periodMs;
+        int64_t executeAtUs = 0;
+        uint32_t eventId = 0;
+        if (displayCount < DISPLAY_PULSE_QUEUE_SIZE &&
+            sendPulseTrigger(PULSE_LARGE, 0, &executeAtUs, &eventId)) {
+            const uint8_t tail = (displayHead + displayCount) %
+                                 DISPLAY_PULSE_QUEUE_SIZE;
+            scheduledDisplayUs[tail] = executeAtUs;
+            ++displayCount;
+        }
+    }
+
+    // Drain acknowledgements; all outputs and the monitor still start from
+    // the same master executeAt timestamp. Waiting for the first ACK here
+    // would make the display follow one transport and de-sync from the other.
+    WifiLedAck wifiAck{};
+    while (wifiTakeLedAck(wifiAck)) {}
+    BleLedAck bleAck{};
+    while (bleTakeLedAck(bleAck)) {}
+
+    fakePulseMode = true;
+    while (displayCount > 0 &&
+           nowUs >= scheduledDisplayUs[displayHead]) {
+        displayedBeatAtUs = scheduledDisplayUs[displayHead];
+        displayHead = (displayHead + 1) % DISPLAY_PULSE_QUEUE_SIZE;
+        --displayCount;
+        visiblePulseCount = visiblePulseCount + 1;
+        if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
+    }
+
+    // A short cuff-like oscillation rather than a broad waveform occupying
+    // most of the heartbeat period.
+    const uint32_t pulseDurationMs = min<uint32_t>(520, periodMs * 65 / 100);
+    const int64_t ageUs = nowUs - displayedBeatAtUs;
+    if (displayedBeatAtUs != 0 && ageUs >= 0 &&
+        ageUs < (int64_t)pulseDurationMs * 1000) {
+        const float phase = (float)ageUs /
+                            ((float)pulseDurationMs * 1000.0f);
+        // The physical LEDs turn on at displayedBeatAtUs. Put the dial peak at
+        // that exact timestamp as well, then return smoothly to baseline.
+        // The previous full raised cosine peaked halfway through the pulse,
+        // making the dial appear roughly 260 ms late.
+        fakePressureOffset = FAKE_PULSE_AMPLITUDE_MMHG *
+                             0.5f * (1.0f + cosf(PI * phase));
+    } else {
+        fakePressureOffset = 0.0f;
+    }
+}
+
+void processSample(int32_t raw, uint32_t milliVolts) {
+    // Discard mode-transition samples before calculating the empty-cuff zero.
+    if (warmupSamples < WARMUP_SAMPLE_COUNT) {
+        ++warmupSamples;
+        return;
+    }
+    if (zeroSamples < ZERO_SAMPLE_COUNT) {
+        zeroRawSum += raw;
+        zeroMilliVoltsSum += milliVolts;
+        const uint16_t newZeroSampleCount = zeroSamples + 1;
+        zeroSamples = newZeroSampleCount;
+        if (newZeroSampleCount == ZERO_SAMPLE_COUNT) {
+            zeroRaw = static_cast<int32_t>(zeroRawSum / newZeroSampleCount);
+            zeroMilliVolts = static_cast<uint32_t>(
+                zeroMilliVoltsSum / newZeroSampleCount);
+            // Never learn an inflated cuff as the zero point. The sensor's
+            // empty-cuff output is nominally 200 mV; a much higher startup
+            // average (913 mV was observed) would clamp all later readings to
+            // zero and make the configured BPM appear far too slow.
+            if (zeroMilliVolts < SENSOR_ZERO_MIN_VALID_MV ||
+                zeroMilliVolts > SENSOR_ZERO_MAX_VALID_MV) {
+                Serial.printf("[SENSOR] rejected startup zero=%lu mV, using nominal=%u mV\n",
+                              (unsigned long)zeroMilliVolts,
+                              (unsigned)SENSOR_NOMINAL_ZERO_MV);
+                zeroMilliVolts = SENSOR_NOMINAL_ZERO_MV;
+            }
+        }
+        return;
+    }
+
+    // The empty-cuff voltage is measured at startup. Nominal transfer:
+    // 0.2 V = 0 kPa and 2.7 V = 40 kPa = 300.02 mmHg.
+    const float usableSpanMv = max(1.0f,
+        (float)SENSOR_FULL_SCALE_MV - (float)zeroMilliVolts);
+    float p = ((float)milliVolts - (float)zeroMilliVolts) *
+              SENSOR_FULL_SCALE_MMHG / usableSpanMv;
+    p *= PRESSURE_GAIN_CORRECTION;
+    p = constrain(p, -20.0f, GAUGE_MAX_MMHG);
+    // No smoothing or low-pass: publish the scaled ADC sample directly.
+    latestRaw = raw;
+    latestMilliVolts = milliVolts;
+    adcSaturated = raw >= ADC_RESOLUTION_MAX - 3 || milliVolts >= 3050;
+    targetPressure = max(0.0f, p);
+    const uint32_t nowMs = millis();
+    updateFakePulse(targetPressure, adcSaturated, nowMs);
+}
+
+void updateUi() {
+    static uint32_t displayedPulseCount = 0;
+    static uint32_t pulseLedUntilMs = 0;
+    static bool pulseLedOn = false;
+    static uint32_t appliedUpperCancelRevision = 0;
+    static float filteredUiBasePressure = -1.0f;
+    static uint32_t appliedScreenPowerRevision = 0;
+    static bool screenOn = true;
+    const uint32_t requestedPowerRevision = screenPowerRevision;
+    if (requestedPowerRevision != appliedScreenPowerRevision) {
+        appliedScreenPowerRevision = requestedPowerRevision;
+        screenOn = requestedScreenOn;
+        if (screenOn) {
+            display->displayOn();
+            // Restore the complete framebuffer once after waking. Normal
+            // operation immediately returns to dirty-region updates.
+            canvas->flush();
+            lastNeedlePressure = -1.0f;
+        } else {
+            display->displayOff();
+        }
+    }
+    if (!screenOn) return;
+
+    static uint32_t appliedThemeRevision = 0;
+    const uint32_t requestedThemeRevision = themeRevision;
+    const bool themeChanged = requestedThemeRevision != appliedThemeRevision;
+    if (themeChanged) {
+        appliedThemeRevision = requestedThemeRevision;
+        drawStaticGauge();
+        const size_t frameBytes =
+            (size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t);
+        memcpy(backgroundPixels, canvas->getFramebuffer(), frameBytes);
+        canvas->flush();
+        lastNeedlePressure = -1.0f;
+        // The freshly rebuilt background already contains the unlit LED.
+        // A currently active beat will redraw it below in the new palette.
+        pulseLedOn = false;
+    }
+
+    // Re-check the pressure at draw time. This prevents a previously queued
+    // display beat from appearing after the cuff has fallen out of range,
+    // even if the sensor task and UI task cross between two frames.
+    const float basePressure = (float)targetPressure;
+    if (filteredUiBasePressure < 0.0f) {
+        filteredUiBasePressure = basePressure;
+    } else {
+        const float difference = basePressure - filteredUiBasePressure;
+        // Strong filtering for ADC jitter, faster tracking while the cuff is
+        // actively inflated/deflated. The synthetic pulse is added afterwards
+        // so its timestamp and 0.6 mmHg amplitude are not delayed or attenuated.
+        const float alpha = fabsf(difference) > 3.0f ? 0.45f : 0.12f;
+        filteredUiBasePressure += difference * alpha;
+        if (fabsf(basePressure - filteredUiBasePressure) < 0.04f) {
+            filteredUiBasePressure = basePressure;
+        }
+    }
+    displayedGaugeBasePressure = filteredUiBasePressure;
+    // The sensor task owns one debounced range state for triggers, the dial
+    // pulse and the UI LED. Using separate raw/filtered boundary checks here
+    // made the UI flicker and changed the apparent BPM near either boundary.
+    const bool fakeVisible = fakePulseMode;
+    const float pressure = constrain(filteredUiBasePressure +
+                                     (fakeVisible
+                                          ? (float)fakePressureOffset
+                                          : 0.0f),
+                                     0.0f, GAUGE_MAX_MMHG);
+
+    const float oldPressure = lastNeedlePressure < 0.0f ? pressure : lastNeedlePressure;
+    int16_t oldX, oldY, newX, newY;
+    pointOnGauge(oldPressure, NEEDLE_RADIUS, oldX, oldY);
+    pointOnGauge(pressure, NEEDLE_RADIUS, newX, newY);
+
+    uint16_t *frame = canvas->getFramebuffer();
+    if (oldX != newX || oldY != newY || lastNeedlePressure < 0.0f) {
+        constexpr int16_t margin = 9;
+        int16_t x1 = min(GAUGE_CX, min(oldX, newX)) - margin;
+        int16_t y1 = min(GAUGE_CY, min(oldY, newY)) - margin;
+        int16_t x2 = max(GAUGE_CX, max(oldX, newX)) + margin;
+        int16_t y2 = max(GAUGE_CY, max(oldY, newY)) + margin;
+        x1 = max((int16_t)0, x1); y1 = max((int16_t)0, y1);
+        x2 = min((int16_t)(SCREEN_W - 1), x2);
+        y2 = min((int16_t)(SCREEN_H - 1), y2);
+        const int16_t width = x2 - x1 + 1;
+        const int16_t height = y2 - y1 + 1;
+        for (int16_t row = y1; row <= y2; ++row) {
+            memcpy(frame + (size_t)row * SCREEN_W + x1,
+                   backgroundPixels + (size_t)row * SCREEN_W + x1,
+                   (size_t)width * sizeof(uint16_t));
+        }
+        const uint16_t needleRed = canvas->color565(212, 21, 32);
+        const uint16_t hubDark = canvas->color565(90, 0, 0);
+        drawThickLine(canvas, GAUGE_CX, GAUGE_CY, newX, newY, needleRed, 5);
+        canvas->fillCircle(GAUGE_CX, GAUGE_CY, 15, hubDark);
+        canvas->fillCircle(GAUGE_CX, GAUGE_CY, 11, needleRed);
+        for (int16_t row = 0; row < height; ++row) {
+            memcpy(dirtyPixels + (size_t)row * width,
+                   frame + (size_t)(y1 + row) * SCREEN_W + x1,
+                   (size_t)width * sizeof(uint16_t));
+        }
+        display->draw16bitRGBBitmap(x1, y1, dirtyPixels, width, height);
+    }
+    lastNeedlePressure = pressure;
+
+    const uint32_t nowMs = millis();
+    const uint32_t pulseCount = visiblePulseCount;
+    const uint32_t upperCancelRevision = fakeUiUpperCancelRevision;
+    if (upperCancelRevision != appliedUpperCancelRevision) {
+        appliedUpperCancelRevision = upperCancelRevision;
+        displayedPulseCount = pulseCount;
+        pulseLedUntilMs = 0;
+    } else if (!fakeVisible) {
+        // Consume any already-counted UI event while hidden so it cannot flash
+        // late when pressure rises above 30 mmHg again.
+        displayedPulseCount = pulseCount;
+        pulseLedUntilMs = 0;
+    } else if (pulseCount != displayedPulseCount) {
+        displayedPulseCount = pulseCount;
+        pulseLedUntilMs = nowMs + PULSE_LED_ON_MS;
+    }
+
+    const bool shouldLightLed = fakeVisible && displayedPulseCount != 0 &&
+                                (int32_t)(pulseLedUntilMs - nowMs) > 0;
+    if (shouldLightLed != pulseLedOn) {
+        drawPulseLed(canvas, shouldLightLed);
+        constexpr int16_t ledMargin = PULSE_LED_RADIUS + 4;
+        constexpr int16_t ledX = PULSE_LED_CX - ledMargin;
+        constexpr int16_t ledY = PULSE_LED_CY - ledMargin;
+        constexpr int16_t ledSize = ledMargin * 2 + 1;
+
+        for (int16_t row = 0; row < ledSize; ++row) {
+            memcpy(dirtyPixels + (size_t)row * ledSize,
+                   frame + (size_t)(ledY + row) * SCREEN_W + ledX,
+                   (size_t)ledSize * sizeof(uint16_t));
+        }
+        display->draw16bitRGBBitmap(ledX, ledY, dirtyPixels,
+                                    ledSize, ledSize);
+        pulseLedOn = shouldLightLed;
+    }
+
+    // Battery indicator occupies the free lower-left area and is redrawn only
+    // when its displayed value changes (normally once every five seconds).
+    static uint8_t lastBatteryPercent = 0xff;
+    static bool lastBatteryValid = false;
+    const uint8_t shownBatteryPercent = batteryPercent;
+    const bool shownBatteryValid = batteryReadingValid;
+    if (themeChanged || shownBatteryPercent != lastBatteryPercent ||
+        shownBatteryValid != lastBatteryValid) {
+        lastBatteryPercent = shownBatteryPercent;
+        lastBatteryValid = shownBatteryValid;
+        constexpr int16_t batX = 188, batY = 433;
+        constexpr int16_t batW = 91, batH = 13;
+        const bool dark = darkTheme;
+        const uint16_t face = canvas->color565(dark ? 5 : 244,
+                                                dark ? 7 : 240,
+                                                dark ? 9 : 230);
+        const uint16_t ink = canvas->color565(dark ? 225 : 40,
+                                               dark ? 228 : 45,
+                                               dark ? 232 : 48);
+        const uint16_t level = shownBatteryPercent > 20
+                                   ? canvas->color565(25, 145, 65)
+                                   : canvas->color565(190, 35, 30);
+        canvas->fillRect(batX, batY, batW, batH, face);
+        canvas->drawRect(batX, batY + 2, 20, 9, ink);
+        canvas->fillRect(batX + 20, batY + 4, 3, 4, ink);
+        if (shownBatteryValid) {
+            const int16_t fillW = (int16_t)shownBatteryPercent * 16 / 100;
+            if (fillW > 0) canvas->fillRect(batX + 2, batY + 4, fillW, 5, level);
+        }
+        canvas->setTextSize(1);
+        canvas->setTextColor(ink);
+        canvas->setCursor(batX + 29, batY + 4);
+        if (shownBatteryValid) {
+            canvas->printf("%u%%", (unsigned)shownBatteryPercent);
+        } else {
+            canvas->print("BAT --");
+        }
+        for (int16_t row = 0; row < batH; ++row) {
+            memcpy(dirtyPixels + (size_t)row * batW,
+                   frame + (size_t)(batY + row) * SCREEN_W + batX,
+                   (size_t)batW * sizeof(uint16_t));
+        }
+        display->draw16bitRGBBitmap(batX, batY, dirtyPixels, batW, batH);
+    }
+
+    // Compact connection strip in the otherwise unused area below the pulse
+    // LED. It is redrawn last so the moving needle cannot erase it.
     const WifiNodeStatus wifi = wifiNodeStatus(WIFI_NODE_ID);
     const BleNodeStatus ble = bleNodeStatus();
-    uiSetNodeStatus(WIFI_NODE_ID, "WiFi", wifi.connected, wifi.synced, wifi.rttUs);
-    uiSetNodeStatus(BLE_NODE_ID, "BLE", ble.connected, ble.synced, ble.rttUs);
-    uiSetDeviceCounts((wifi.connected ? 1 : 0) + (ble.connected ? 1 : 0),
-                      (wifi.synced ? 1 : 0) + (ble.synced ? 1 : 0));
-    uiSetSystemReady(wifi.synced && ble.synced);
-    WifiLedAck wifiAck{};
-    while (wifiTakeLedAck(wifiAck)) recordAck(wifiAck.eventId, true, wifiAck.actualMasterUs);
-    BleLedAck bleAck{};
-    while (bleTakeLedAck(bleAck)) recordAck(bleAck.eventId, false, bleAck.actualMasterUs);
+    static uint8_t lastStatusBits = 0xff;
+    const uint8_t statusBits = (wifi.connected ? 0x01 : 0) |
+                               (wifi.synced ? 0x02 : 0) |
+                               (ble.connected ? 0x04 : 0) |
+                               (ble.synced ? 0x08 : 0);
+    if (themeChanged || statusBits != lastStatusBits) {
+        lastStatusBits = statusBits;
+    constexpr int16_t statusX = 195, statusY = 449;
+    constexpr int16_t statusW = 76, statusH = 13;
+    const bool dark = darkTheme;
+    const uint16_t face = canvas->color565(dark ? 5 : 244,
+                                            dark ? 7 : 240,
+                                            dark ? 9 : 230);
+    const uint16_t ok = canvas->color565(dark ? 65 : 0,
+                                          dark ? 220 : 120,
+                                          dark ? 105 : 45);
+    const uint16_t bad = canvas->color565(dark ? 255 : 170,
+                                           dark ? 80 : 25,
+                                           dark ? 75 : 25);
+    canvas->fillRect(statusX, statusY, statusW, statusH, face);
+    canvas->setTextSize(1);
+    canvas->setTextColor(wifi.synced ? ok : bad);
+    canvas->setCursor(statusX, statusY + 2);
+    canvas->print("W:");
+    canvas->print(wifi.synced ? "OK" : (wifi.connected ? "SYNC" : "OFF"));
+    canvas->setTextColor(ble.synced ? ok : bad);
+    canvas->setCursor(statusX + 38, statusY + 2);
+    canvas->print("B:");
+    canvas->print(ble.synced ? "OK" : (ble.connected ? "SYNC" : "OFF"));
+    for (int16_t row = 0; row < statusH; ++row) {
+        memcpy(dirtyPixels + (size_t)row * statusW,
+               frame + (size_t)(statusY + row) * SCREEN_W + statusX,
+               (size_t)statusW * sizeof(uint16_t));
+    }
+    display->draw16bitRGBBitmap(statusX, statusY, dirtyPixels,
+                                statusW, statusH);
+    }
+}
+
+void sensorTask(void *) {
+    TickType_t lastWakeTick = xTaskGetTickCount();
+    const TickType_t samplePeriodTicks = pdMS_TO_TICKS(2);
+    uint32_t rateWindowStarted = millis();
+    uint16_t sampleCount = 0;
+    uint32_t lastBatteryUpdateMs = 0;
+
+    for (;;) {
+        const TickType_t sensorNowTick = xTaskGetTickCount();
+        if ((int32_t)(sensorNowTick - lastWakeTick) >
+            (int32_t)(samplePeriodTicks * 2)) {
+            // Drop missed samples instead of running thousands of catch-up
+            // iterations that temporarily starve the rest of the system.
+            lastWakeTick = sensorNowTick;
+        }
+        // Block instead of busy-spinning between 500 Hz samples. This leaves
+        // CPU time for the display and, most importantly, the radio stacks.
+        vTaskDelayUntil(&lastWakeTick, samplePeriodTicks);
+
+        // Two adjacent conversions expose both native 12-bit data and the
+        // ESP32 calibration result in millivolts on the serial monitor.
+        const int32_t raw = analogRead(PRESSURE_ADC_PIN);
+        const uint32_t milliVolts = analogReadMilliVolts(PRESSURE_ADC_PIN);
+        processSample(raw, milliVolts);
+        ++sampleCount;
+
+        const uint32_t now = millis();
+        if (now - lastBatteryUpdateMs >= BATTERY_UPDATE_MS) {
+            lastBatteryUpdateMs = now;
+            updateBatteryMeasurement();
+        }
+        if (now - rateWindowStarted >= 1000) {
+            measuredSps = (uint32_t)sampleCount * 1000 /
+                          (now - rateWindowStarted);
+            sampleCount = 0;
+            rateWindowStarted = now;
+        }
+    }
+}
+
+void uiTask(void *) {
+    const TickType_t framePeriodTicks = pdMS_TO_TICKS(1000 / UI_REFRESH_HZ);
+    TickType_t lastPeriodicFrame = xTaskGetTickCount();
+    uint32_t rateWindowStarted = millis();
+    uint16_t frameCount = 0;
+
+    for (;;) {
+        // Keep an absolute 30 Hz timeline: drawing time is part of the 33 ms
+        // frame budget instead of being added before every wait. A trigger can
+        // wake us early without shifting subsequent periodic frames.
+        TickType_t nowTick = xTaskGetTickCount();
+        TickType_t deadline = lastPeriodicFrame + framePeriodTicks;
+        TickType_t waitTicks = (int32_t)(deadline - nowTick) > 0
+                                   ? deadline - nowTick
+                                   : 0;
+        const bool triggerWake =
+            ulTaskNotifyTake(pdTRUE, waitTicks) > 0;
+        nowTick = xTaskGetTickCount();
+        if (!triggerWake || (int32_t)(nowTick - deadline) >= 0) {
+            // Advance by one fixed period. If unexpectedly very late, discard
+            // missed frames rather than burst-rendering them.
+            lastPeriodicFrame = deadline;
+            if ((int32_t)(nowTick - lastPeriodicFrame) >
+                (int32_t)(framePeriodTicks * 2)) {
+                lastPeriodicFrame = nowTick;
+            }
+        }
+
+        const uint32_t drawStartedMs = millis();
+        updateUi();
+        const uint32_t drawMs = millis() - drawStartedMs;
+        lastUiFrameMs = millis();
+        if (drawMs > maxUiDrawMs) {
+            maxUiDrawMs = (uint16_t)min<uint32_t>(drawMs, UINT16_MAX);
+        }
+        ++frameCount;
+
+        const uint32_t now = millis();
+        if (now - rateWindowStarted >= 1000) {
+            measuredUiFps = (uint32_t)frameCount * 1000 /
+                            (now - rateWindowStarted);
+            frameCount = 0;
+            rateWindowStarted = now;
+        }
+
+        // An early trigger frame may itself cross the pending periodic
+        // deadline. Count it as that frame so we never draw twice back-to-back.
+        if (triggerWake) {
+            nowTick = xTaskGetTickCount();
+            deadline = lastPeriodicFrame + framePeriodTicks;
+            if ((int32_t)(nowTick - deadline) >= 0) {
+                lastPeriodicFrame = deadline;
+            }
+        }
+    }
 }
 
 void setup() {
     Serial.begin(115200);
-    delay(200);
-    Serial.println("ECG WIFI + BLE MASTER start");
-    if (!uiBegin()) Serial.println("[UI] INITIALIZATION FAILED");
+    Preferences settings;
+    if (settings.begin("bp-sim", true)) {
+        fakeBpm = constrain(settings.getUShort("bpm", DEFAULT_FAKE_BPM),
+                            (uint16_t)30, (uint16_t)240);
+        fakeMaxPressureMmHg = constrain(
+            settings.getUShort("max_mmhg", DEFAULT_FAKE_MAX_PRESSURE_MMHG),
+            (uint16_t)31, (uint16_t)300);
+        fakeMinPressureMmHg = constrain(
+            settings.getUShort("min_mmhg", DEFAULT_FAKE_MIN_PRESSURE_MMHG),
+            (uint16_t)1, (uint16_t)(fakeMaxPressureMmHg - 1));
+        settings.end();
+    }
+    Serial.printf("[FAKE PULSE] current BPM=%u range=%u-%u mmHg\n",
+                  (unsigned)fakeBpm, (unsigned)fakeMinPressureMmHg,
+                  (unsigned)fakeMaxPressureMmHg);
+    pinMode(PRESSURE_ADC_PIN, INPUT);
+    pinMode(BATTERY_ADC_PIN, INPUT);
+    analogReadResolution(12);
+    analogSetPinAttenuation(PRESSURE_ADC_PIN, ADC_11db);
+    analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db);
+    if (!beginUi()) Serial.println("[UI] display initialization failed");
+    Wire.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN, 400000);
+    Wire.setTimeOut(10);
+    Wire.beginTransmission(TOUCH_I2C_ADDRESS);
+    touchAvailable = Wire.endTransmission() == 0;
+    Serial.printf("[TOUCH] I2C 0x%02X on GPIO%u/%u: %s\n",
+                  TOUCH_I2C_ADDRESS, TOUCH_SDA_PIN, TOUCH_SCL_PIN,
+                  touchAvailable ? "ready" : "not found");
     wifiMasterBegin();
     bleMasterBegin();
+    blePublishBpm(fakeBpm, fakeMaxPressureMmHg, fakeMinPressureMmHg);
+    Serial.printf("[SENSOR] analog GPIO%u, nominal 0.2-%.3f V -> 0-%.2f mmHg\n",
+                  PRESSURE_ADC_PIN, SENSOR_FULL_SCALE_MV / 1000.0f,
+                  SENSOR_FULL_SCALE_MMHG);
+    Serial.println("[SENSOR] Keep cuff empty during startup auto-zero");
+    // UI responsiveness is the primary requirement: Core 1 is dedicated to
+    // the display task at high priority. The sensor blocks between samples,
+    // so its short ADC work can safely share Core 0 with the radio stacks.
+    xTaskCreatePinnedToCore(sensorTask, "pressure_adc", 4096, nullptr, 3,
+                            nullptr, 0);
+    xTaskCreatePinnedToCore(uiTask, "dial_30hz", 4096, nullptr, 4,
+                            &uiTaskHandle, 1);
 }
 
 void loop() {
-    const int64_t now = masterTimeUs();
-    EcgEvent event;
-    if (fakeEcgNextEvent(now, event)) {
-        uiSetBpm(event.bpm);
-        // UI veya ag islemi donguyu geciktirdiyse artik gecmiste kalan ECG
-        // olayini slave'lere yollama. fakeEcg sonraki dongulerde hizla guncel
-        // olaya yetisir; boylece gecmis trigger kuyrugu olusmaz.
-        if (event.atUs + wifiRecommendedLeadUs() > now) {
-            sendTrigger(event);
+    updateTouchGesture();
+    BlePhoneCommand phoneCommand{};
+    while (bleTakePhoneCommand(phoneCommand)) {
+        if (phoneCommand.type == BLE_PHONE_SET_BPM) {
+            if (phoneCommand.hasPressureRange) {
+                fakeMaxPressureMmHg = phoneCommand.systolicMmHg;
+                fakeMinPressureMmHg = phoneCommand.diastolicMmHg;
+            }
+            // Runtime BLE changes are deliberately RAM-only. NVS/flash writes
+            // can suspend instruction-cache access and visibly freeze the UI.
+            fakeBpm = phoneCommand.bpm;
+            fakeBpmRevision = fakeBpmRevision + 1;
+            blePublishBpm(phoneCommand.bpm, fakeMaxPressureMmHg,
+                          fakeMinPressureMmHg);
+            Serial.printf("[FAKE PULSE] BPM=%u range=%u-%u mmHg active\n",
+                          (unsigned)phoneCommand.bpm,
+                          (unsigned)fakeMinPressureMmHg,
+                          (unsigned)fakeMaxPressureMmHg);
+        } else {
+            sendPulseTrigger(phoneCommand.pulseType,
+                             phoneCommand.targetMask);
         }
     }
-    schedulerTick(now);
-    // Wi-Fi ve BLE Core 0'daki ayri ag gorevlerinde calisir. Core 1 yalnizca
-    // zamanlama ve LVGL ekranini yonetir.
-    publishMixedStatus();
-    uiTick();
-    delay(1);
+    const uint32_t now = millis();
+    if (Serial && now - lastSerialMs >= 500 &&
+        zeroSamples >= ZERO_SAMPLE_COUNT) {
+        lastSerialMs = now;
+        const int32_t raw = latestRaw;
+        const uint32_t milliVolts = latestMilliVolts;
+        const float pressure = targetPressure;
+        const uint32_t uiAgeMs = now - lastUiFrameMs;
+        const uint16_t uiMaxMs = maxUiDrawMs;
+        maxUiDrawMs = 0;
+        Serial.printf("[SENSOR] adc=%ld delta=%ld mV=%lu zero_mV=%lu mmHg=%.2f sat=%u sps=%u ui_fps=%u ui_age=%lu ui_max=%u bpm=%u bat=%umV/%u%%\n",
+                      (long)raw, (long)(raw - zeroRaw),
+                      (unsigned long)milliVolts,
+                      (unsigned long)zeroMilliVolts, pressure,
+                      adcSaturated ? 1U : 0U, measuredSps, measuredUiFps,
+                      (unsigned long)uiAgeMs, (unsigned)uiMaxMs,
+                      (unsigned)fakeBpm, (unsigned)batteryVoltageMv,
+                      (unsigned)batteryPercent);
+    }
+    delay(20);
 }

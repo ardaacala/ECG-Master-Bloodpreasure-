@@ -6,14 +6,15 @@ paketlerini paylasir.
 
 ## Ortamlar
 
-- `slave-gpio4-active-low`: Eski LED_NODE_1 donanimi (varsayilan)
-- `slave-gpio2-active-high`: Eski LED_NODE_2 donanimi
+- `slave-gpio2-active-high`: Aktif varsayilan, LED GPIO2 active-high.
+- `slave-gpio4-active-low`: Alternatif eski donanim, GPIO4 active-low.
 
 Ornek yukleme:
 
 ```powershell
-pio run -e slave-gpio4-active-low -t upload --upload-port COM3
+pio run -e slave-gpio2-active-high -t upload --upload-port COM3
 ```
 
-Ayni ortami istenen sayida uyumlu slave karta yukleyebilirsiniz. Her slave
-master'a bagimsiz TCP istemcisi olarak baglanir.
+Yuklemeden once `include/secrets.example.h` dosyasini `include/secrets.h`
+olarak kopyalayip master ile ayni Wi-Fi parolasini girin. Gercek secrets dosyasi
+Git'e eklenmez.

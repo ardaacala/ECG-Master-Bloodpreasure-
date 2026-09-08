@@ -29,3 +29,10 @@ static const char RX_UUID[] = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 static const char TX_UUID[] = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 struct __attribute__((packed)) BleTriggerPacket { uint8_t type; uint32_t eventId; uint8_t pulseType; int64_t executeAtMasterUs; uint32_t ledOnTimeUs; };
 struct __attribute__((packed)) BleLedOnAck { uint8_t type; uint32_t eventId; int64_t ledOnAtLocalUs; };
+
+// iOS/Android BLE scanner applications connect to the master through this
+// separate GATT service. Commands are UTF-8 text written to CONTROL_RX_UUID;
+// replies are readable/notified from CONTROL_TX_UUID.
+static const char CONTROL_SERVICE_UUID[] = "7d2e0001-8d7b-4f91-a8d3-4c7f2b6a1000";
+static const char CONTROL_RX_UUID[]      = "7d2e0002-8d7b-4f91-a8d3-4c7f2b6a1000";
+static const char CONTROL_TX_UUID[]      = "7d2e0003-8d7b-4f91-a8d3-4c7f2b6a1000";

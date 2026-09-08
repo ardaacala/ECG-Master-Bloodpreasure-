@@ -5,6 +5,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <ctype.h>
 
 static NimBLEClient *client = nullptr;
 static NimBLERemoteCharacteristic *rx = nullptr;
@@ -14,6 +15,7 @@ static bool connected = false;
 static bool synced = false;
 static int64_t offsetUs = 0;
 static int64_t bestRttUs = INT64_MAX;
+static uint8_t syncSamples = 0;
 static int64_t lastRttUs = 0;
 static int64_t pendingT1 = 0;
 static uint32_t pendingRequest = 0;
@@ -22,12 +24,163 @@ static uint32_t lastSyncRequestMs = 0;
 static uint32_t lastSyncMs = 0;
 static QueueHandle_t ackQueue = nullptr;
 static QueueHandle_t triggerQueue = nullptr;
+static QueueHandle_t phoneTriggerQueue = nullptr;
 static TaskHandle_t bleTaskHandle = nullptr;
+static NimBLECharacteristic *phoneStatus = nullptr;
+static volatile bool phoneConnected = false;
+static volatile uint16_t phoneBpm = 0;
+static volatile uint16_t phoneSystolicMmHg = 0;
+static volatile uint16_t phoneDiastolicMmHg = 0;
 static volatile bool publishedConnected = false;
 static volatile bool publishedSynced = false;
 static volatile uint32_t publishedRttUs = 0;
 
 static constexpr uint8_t BLE_TRIGGER_QUEUE_LENGTH = 16;
+
+static void publishPhoneText(const char *text) {
+    if (!phoneStatus || !text) return;
+    phoneStatus->setValue(text);
+    if (phoneConnected) phoneStatus->notify();
+}
+
+class PhoneServerCallbacks : public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer *, NimBLEConnInfo &info) override {
+        phoneConnected = true;
+        Serial.printf("[BLE PHONE] connected: %s\n",
+                      info.getAddress().toString().c_str());
+        char status[40];
+        snprintf(status, sizeof(status), "BPM %u SYS %u DIA %u",
+                 (unsigned)phoneBpm, (unsigned)phoneSystolicMmHg,
+                 (unsigned)phoneDiastolicMmHg);
+        publishPhoneText(status);
+    }
+
+    void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
+        phoneConnected = false;
+        Serial.printf("[BLE PHONE] disconnected, reason=%d\n", reason);
+        NimBLEDevice::startAdvertising();
+    }
+};
+static PhoneServerCallbacks phoneServerCallbacks;
+
+class PhoneCommandCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic *characteristic,
+                 NimBLEConnInfo &) override {
+        std::string value = characteristic->getValue();
+        while (!value.empty() && isspace((unsigned char)value.front())) value.erase(0, 1);
+        while (!value.empty() && isspace((unsigned char)value.back())) value.pop_back();
+        for (char &c : value) c = (char)toupper((unsigned char)c);
+
+        BlePhoneCommand command{BLE_PHONE_TRIGGER, 0, 0, 0, false,
+                                PULSE_LARGE, 0};
+        bool valid = false;
+        const size_t firstComma = value.find(',');
+        const size_t secondComma = firstComma == std::string::npos
+                                       ? std::string::npos
+                                       : value.find(',', firstComma + 1);
+        if (firstComma != std::string::npos) {
+            const std::string bpmText = value.substr(0, firstComma);
+            const std::string sysText = secondComma == std::string::npos
+                ? "" : value.substr(firstComma + 1,
+                                     secondComma - firstComma - 1);
+            const std::string diaText = secondComma == std::string::npos
+                ? "" : value.substr(secondComma + 1);
+            const bool tripleNumeric = !bpmText.empty() && !sysText.empty() &&
+                !diaText.empty() &&
+                bpmText.find_first_not_of("0123456789") == std::string::npos &&
+                sysText.find_first_not_of("0123456789") == std::string::npos &&
+                diaText.find_first_not_of("0123456789") == std::string::npos;
+            const long bpm = tripleNumeric ? strtol(bpmText.c_str(), nullptr, 10) : 0;
+            const long systolic = tripleNumeric ? strtol(sysText.c_str(), nullptr, 10) : 0;
+            const long diastolic = tripleNumeric ? strtol(diaText.c_str(), nullptr, 10) : 0;
+            if (!tripleNumeric || bpm < 30 || bpm > 240 ||
+                systolic < 31 || systolic > 300 || diastolic < 1 ||
+                diastolic >= systolic) {
+                publishPhoneText("ERR BPM,SYS,DIA");
+                return;
+            }
+            command.type = BLE_PHONE_SET_BPM;
+            command.bpm = (uint16_t)bpm;
+            command.systolicMmHg = (uint16_t)systolic;
+            command.diastolicMmHg = (uint16_t)diastolic;
+            command.hasPressureRange = true;
+            valid = true;
+        }
+        bool numeric = !value.empty();
+        for (char c : value) numeric = numeric && isdigit((unsigned char)c);
+        if (!valid && numeric) {
+            const long bpm = strtol(value.c_str(), nullptr, 10);
+            if (bpm < 30 || bpm > 240) {
+                publishPhoneText("ERR BPM 30-240");
+                return;
+            }
+            command.type = BLE_PHONE_SET_BPM;
+            command.bpm = (uint16_t)bpm;
+            valid = true;
+        } else if (!valid) {
+            if (value == "TRIGGER" || value == "LARGE" || value == "ALL" ||
+                value == "LARGE ALL") {
+                valid = true;
+            } else if (value == "SMALL" || value == "SMALL ALL") {
+                command.pulseType = PULSE_SMALL;
+                valid = true;
+            } else if (value == "WIFI" || value == "LARGE WIFI") {
+                command.targetMask = maskForDevice(WIFI_NODE_ID);
+                valid = true;
+            } else if (value == "SMALL WIFI") {
+                command.pulseType = PULSE_SMALL;
+                command.targetMask = maskForDevice(WIFI_NODE_ID);
+                valid = true;
+            } else if (value == "BLE" || value == "LARGE BLE") {
+                command.targetMask = maskForDevice(BLE_NODE_ID);
+                valid = true;
+            } else if (value == "SMALL BLE") {
+                command.pulseType = PULSE_SMALL;
+                command.targetMask = maskForDevice(BLE_NODE_ID);
+                valid = true;
+            }
+        }
+
+        if (!valid) {
+            publishPhoneText("ERR WRITE BPM");
+            Serial.printf("[BLE PHONE] invalid command (%u bytes)\n",
+                          (unsigned)value.size());
+            return;
+        }
+        if (!phoneTriggerQueue ||
+            xQueueSend(phoneTriggerQueue, &command, 0) != pdTRUE) {
+            publishPhoneText("ERR BUSY");
+            return;
+        }
+        publishPhoneText(command.type == BLE_PHONE_SET_BPM
+                             ? "BPM QUEUED" : "TRIGGER QUEUED");
+        Serial.printf("[BLE PHONE] command=%s target=0x%llx\n",
+                      value.c_str(), (unsigned long long)command.targetMask);
+    }
+};
+static PhoneCommandCallbacks phoneCommandCallbacks;
+
+static void beginPhoneControlService() {
+    NimBLEServer *server = NimBLEDevice::createServer();
+    if (!server) {
+        Serial.println("[BLE PHONE] server could not be created");
+        return;
+    }
+    server->setCallbacks(&phoneServerCallbacks);
+    NimBLEService *service = server->createService(CONTROL_SERVICE_UUID);
+    NimBLECharacteristic *command = service->createCharacteristic(
+        CONTROL_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    phoneStatus = service->createCharacteristic(
+        CONTROL_TX_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    command->setCallbacks(&phoneCommandCallbacks);
+    phoneStatus->setValue("WRITE BPM OR BPM,SYS,DIA");
+    NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
+    advertising->setName("BP_TRIGGER_MASTER");
+    advertising->addServiceUUID(CONTROL_SERVICE_UUID);
+    advertising->enableScanResponse(true);
+    advertising->start();
+    Serial.println("[BLE PHONE] advertising as BP_TRIGGER_MASTER");
+}
 
 class ClientCallbacks : public NimBLEClientCallbacks {
     void onDisconnect(NimBLEClient *, int reason) override {
@@ -67,16 +220,26 @@ static void onNotify(NimBLERemoteCharacteristic *characteristic,
     if (rtt < 0 || rtt > 200000) return;
     const int64_t measuredOffset =
         ((response.t2 - pendingT1) + (response.t3 - t4)) / 2;
-    if (bestRttUs == INT64_MAX) offsetUs = measuredOffset;
-    else offsetUs += (measuredOffset - offsetUs) / 4;
-    if (rtt < bestRttUs) bestRttUs = rtt;
+    // BLE request/notification latency is asymmetric. Prefer the lowest RTT
+    // sample, which has the smallest possible offset error, and only smooth
+    // samples that are close to that best path.
+    if (bestRttUs == INT64_MAX || rtt < bestRttUs) {
+        offsetUs = measuredOffset;
+        bestRttUs = rtt;
+    } else if (rtt <= bestRttUs + 5000) {
+        offsetUs += (measuredOffset - offsetUs) / 4;
+    }
     lastRttUs = rtt;
     SyncCommit commit{MSG_SYNC_COMMIT, response.requestId, offsetUs};
     rx->writeValue((uint8_t *)&commit, sizeof(commit), false);
     lastSyncMs = millis();
-    if (!synced) Serial.printf("[SYNC] BLE %s RTT:%lld OFFSET:%+lld SYNCED\n",
-                               BLE_NODE_NAME, (long long)rtt, (long long)offsetUs);
-    synced = true;
+    if (syncSamples < 3) ++syncSamples;
+    if (!synced && syncSamples >= 3) {
+        Serial.printf("[SYNC] BLE %s RTT:%lld OFFSET:%+lld SYNCED\n",
+                      BLE_NODE_NAME, (long long)bestRttUs,
+                      (long long)offsetUs);
+        synced = true;
+    }
 }
 
 static void connectPending() {
@@ -96,7 +259,7 @@ static void connectPending() {
     if (!rx || !tx || !tx->subscribe(true, onNotify)) {
         client->disconnect(); return;
     }
-    connected = true; synced = false; bestRttUs = INT64_MAX;
+    connected = true; synced = false; bestRttUs = INT64_MAX; syncSamples = 0;
     lastSyncRequestMs = 0;
     Serial.printf("[BLE] %s connected\n", BLE_NODE_NAME);
 }
@@ -104,7 +267,9 @@ static void connectPending() {
 void bleMasterBegin() {
     ackQueue = xQueueCreate(16, sizeof(BleLedAck));
     triggerQueue = xQueueCreate(BLE_TRIGGER_QUEUE_LENGTH, sizeof(BleTriggerPacket));
+    phoneTriggerQueue = xQueueCreate(8, sizeof(BlePhoneCommand));
     NimBLEDevice::init("ECG_MASTER_WIFI_BLE");
+    beginPhoneControlService();
     NimBLEScan *scan = NimBLEDevice::getScan();
     scan->setScanCallbacks(&scanCallbacks);
     scan->setActiveScan(true);
@@ -131,10 +296,11 @@ void bleMasterTick() {
     if (!connected && !pendingDevice && !scan->isScanning()) scan->start(5000, false);
     const uint32_t nowMs = millis();
     if (synced && nowMs - lastSyncMs >= BLE_SYNC_TIMEOUT_MS) {
-        synced = false; bestRttUs = INT64_MAX;
+        synced = false; bestRttUs = INT64_MAX; syncSamples = 0;
         Serial.println("[SYNC] BLE timeout");
     }
-    if (connected && rx && nowMs - lastSyncRequestMs >= BLE_RESYNC_INTERVAL_MS) {
+    const uint32_t syncIntervalMs = synced ? BLE_RESYNC_INTERVAL_MS : 500;
+    if (connected && rx && nowMs - lastSyncRequestMs >= syncIntervalMs) {
         pendingT1 = esp_timer_get_time();
         pendingRequest = ++nextRequest;
         lastSyncRequestMs = nowMs;
@@ -171,6 +337,31 @@ bool bleSendTrigger(const TriggerPacket &packet) {
 
 bool bleTakeLedAck(BleLedAck &ack) {
     return ackQueue && xQueueReceive(ackQueue, &ack, 0) == pdTRUE;
+}
+
+bool bleTakePhoneCommand(BlePhoneCommand &command) {
+    return phoneTriggerQueue &&
+           xQueueReceive(phoneTriggerQueue, &command, 0) == pdTRUE;
+}
+
+void blePublishBpm(uint16_t bpm, uint16_t systolicMmHg,
+                   uint16_t diastolicMmHg) {
+    phoneBpm = bpm;
+    phoneSystolicMmHg = systolicMmHg;
+    phoneDiastolicMmHg = diastolicMmHg;
+    char result[48];
+    snprintf(result, sizeof(result), "BPM %u SYS %u DIA %u SAVED",
+             (unsigned)bpm, (unsigned)systolicMmHg,
+             (unsigned)diastolicMmHg);
+    publishPhoneText(result);
+}
+
+void blePublishPhoneResult(uint32_t eventId, bool wifiQueued, bool bleQueued) {
+    char result[48];
+    snprintf(result, sizeof(result), "OK %lu WIFI=%u BLE=%u",
+             (unsigned long)eventId, wifiQueued ? 1U : 0U,
+             bleQueued ? 1U : 0U);
+    publishPhoneText(result);
 }
 
 uint32_t bleRecommendedLeadUs() {

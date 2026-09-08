@@ -1,7 +1,11 @@
 #pragma once
 
 #define WIFI_SSID "ECG_MASTER"
-#define WIFI_PASSWORD "ecgmaster123"
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#define WIFI_PASSWORD "CHANGE_ME"
+#endif
 #define MASTER_IP_1 192
 #define MASTER_IP_2 168
 #define MASTER_IP_3 4

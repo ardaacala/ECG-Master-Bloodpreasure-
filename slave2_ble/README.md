@@ -1,6 +1,6 @@
 # Slave 2 BLE
 
-Bu ayri PlatformIO projesi master'a `LED_NODE_2` adiyla BLE uzerinden baglanir.
+Bu ayri PlatformIO projesi master'a `LED_NODE_1` adiyla BLE uzerinden baglanir.
 Wi-Fi kullanmaz. Slave 2 donanimina uygun olarak LED cikisi GPIO4 ve
 aktif-dusuktur.
 
