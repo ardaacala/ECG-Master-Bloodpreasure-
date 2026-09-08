@@ -110,10 +110,21 @@ lookup table + interpolasyonla hesaplanır. USB/şarj sırasında değer doğal 
 ### Feature: Battery level while charging fix
 
 `feature/battery-level-while-charging-fix` dalında BAT_ADC voltajındaki ani
-yukarı sıçrama doğrudan yüzde artışı kabul edilmez. Artış, 1500 mAh hücre ve
-kartın şarj devresi için fiziksel olarak makul en hızlı 90 dakikalık 0–100%
-zamanına sınırlandırılır. USB çıkarıldığında 70 mV veya daha büyük düşüş hızlı
-uygulanır; gösterge eski filtredeki gibi dakikalarca yüksek kalmaz.
+yukarı sıçrama doğrudan yüzde artışı kabul edilmez. Kart şemasındaki ETA6098
+`ISET` direnci 82 kΩ'dur ve şarj akımını 500 mA'e ayarlar. Yazılım, kablo
+takılmadan önceki lookup-table SOC değerini korur; yükseliş üç ardışık ölçümle
+doğrulanınca 1500 mAh kapasite, %98 hücre coulombic verimi ve CC/CV son-dolum
+yavaşlamasıyla SOC'yi zaman üzerinden ilerletir. Böylece şarj sırasında görülen
+4.20 V, gerçek batarya hemen dolmuş gibi yorumlanmaz. USB çıkarıldığında 70 mV veya daha büyük
+düşüş hızlı uygulanır ve tekrar batarya-only voltaj eğrisine dönülür. Tahmini
+şarj durumu aktifken batarya yüzdesinin yanında `CHG` gösterilir.
+
+Modeldeki `BATTERY_CAPACITY_MAH`, `BATTERY_CHARGE_CURRENT_MA` ve
+`BATTERY_CHARGE_COULOMBIC_EFFICIENCY` sabitleri farklı pil veya ölçülmüş şarj süresine göre
+kalibre edilebilir. Yeni/sağlıklı 1500 mAh pil varsayımı kullanılır; yaşlanma,
+sıcaklık ve gerçek kapasite nedeniyle bu yöntem fuel-gauge entegresi kadar kesin
+değildir, fakat şarj gerilimini doğrudan yüzdeye çevirmekten belirgin biçimde
+daha gerçekçidir.
 
 Kartın ETA6098 `STAT` çıkışı ESP32 GPIO'suna bağlı olmadığı için yazılım yalnızca
 BAT_ADC ile şarj kablosunu kesin olarak algılayamaz. Sistem USB zaten takılıyken

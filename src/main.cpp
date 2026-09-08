@@ -20,16 +20,24 @@ constexpr uint8_t PRESSURE_ADC_PIN = 2;
 constexpr float BATTERY_DIVIDER_RATIO = 3.0f;
 constexpr uint32_t BATTERY_UPDATE_MS = 5000;
 constexpr uint8_t BATTERY_SAMPLE_COUNT = 32;
-// ETA6098 charge voltage can raise BAT_ADC much faster than the cell's real
-// state of charge. The charger status pin is not routed to the ESP32, so SOC
-// increases are limited to a physically plausible 0-100% charge time instead
-// of trusting an immediate voltage jump. A falling step is applied quickly so
-// unplugging USB returns to the battery-only estimate without a long tail.
-constexpr uint32_t BATTERY_MIN_FULL_CHARGE_MS = 90UL * 60UL * 1000UL;
+// The schematic fits 82 kOhm at ETA6098 ISET, which programs 0.5 A. While
+// charging, BAT_ADC is a terminal/charger voltage and is not a usable OCV SOC
+// reading. Detect its sustained connection step, retain the pre-charge SOC,
+// then integrate a 1500 mAh CC/CV model instead of mapping 4.2 V to 100%.
+constexpr float BATTERY_CAPACITY_MAH = 1500.0f;
+constexpr float BATTERY_CHARGE_CURRENT_MA = 500.0f;
+// ISET specifies battery-side current. This is the cell's approximate
+// coulombic acceptance factor, not the charger's power-conversion efficiency.
+constexpr float BATTERY_CHARGE_COULOMBIC_EFFICIENCY = 0.98f;
+constexpr uint16_t BATTERY_CHARGE_STEP_MV = 50;
+constexpr uint16_t BATTERY_CHARGE_HOLD_MV = 35;
+constexpr uint8_t BATTERY_CHARGE_CONFIRM_SAMPLES = 3;
 constexpr uint16_t BATTERY_FAST_DROP_MV = 70;
+constexpr uint16_t BATTERY_FULL_UNPLUG_MV = 4160;
 constexpr float BATTERY_VOLTAGE_RISE_ALPHA = 0.08f;
 constexpr float BATTERY_VOLTAGE_FALL_ALPHA = 0.35f;
 constexpr float BATTERY_SOC_FALL_ALPHA = 0.45f;
+constexpr float BATTERY_SOC_RISE_ALPHA = 0.12f;
 constexpr float BATTERY_SOC_HYSTERESIS_PERCENT = 1.0f;
 constexpr uint16_t ADC_RESOLUTION_MAX = 4095;
 constexpr uint16_t SENSOR_NOMINAL_ZERO_MV = 200;
@@ -121,7 +129,7 @@ volatile uint16_t maxUiDrawMs = 0;
 volatile uint16_t batteryVoltageMv = 0;
 volatile uint8_t batteryPercent = 0;
 volatile bool batteryReadingValid = false;
-volatile bool batteryRiseLimited = false;
+volatile bool batteryChargingEstimated = false;
 volatile bool darkTheme = false;
 volatile uint32_t themeRevision = 0;
 volatile bool requestedScreenOn = true;
@@ -156,6 +164,25 @@ uint8_t batteryPercentFromMillivolts(uint16_t millivolts) {
     return 0;
 }
 
+float batteryChargeTaperFactor(float percent) {
+    // ETA6098 charges at constant current for most of the cycle and tapers near
+    // 4.2 V. These bands keep the time estimate realistic near full charge.
+    if (percent < 85.0f) return 1.0f;
+    if (percent < 93.0f) return 0.72f;
+    if (percent < 98.0f) return 0.42f;
+    return 0.16f;
+}
+
+float advanceBatteryChargeEstimate(float percent, uint32_t elapsedMs) {
+    const float idealPercentPerMs =
+        (BATTERY_CHARGE_CURRENT_MA *
+         BATTERY_CHARGE_COULOMBIC_EFFICIENCY * 100.0f) /
+        (BATTERY_CAPACITY_MAH * 3600000.0f);
+    return min(100.0f,
+               percent + idealPercentPerMs * (float)elapsedMs *
+                             batteryChargeTaperFactor(percent));
+}
+
 void updateBatteryMeasurement() {
     uint32_t adcMillivoltSum = 0;
     for (uint8_t i = 0; i < BATTERY_SAMPLE_COUNT; ++i) {
@@ -169,6 +196,14 @@ void updateBatteryMeasurement() {
     static float estimatedBatteryPercent = -1.0f;
     static uint16_t previousMeasuredBatteryMv = 0;
     static uint32_t previousUpdateMs = 0;
+    static bool chargeCandidate = false;
+    static uint8_t chargeConfirmSamples = 0;
+    static uint16_t preChargeBatteryMv = 0;
+    static float preChargeBatteryPercent = 0.0f;
+    static uint32_t chargeCandidateStartedMs = 0;
+    static bool charging = false;
+    static uint16_t chargingPeakMv = 0;
+    static uint8_t fullUnplugConfirmSamples = 0;
     const uint32_t nowMs = millis();
     const uint16_t measuredMv = (uint16_t)constrain(
         lroundf(measuredBatteryMv), 0L, 5000L);
@@ -176,51 +211,110 @@ void updateBatteryMeasurement() {
         previousMeasuredBatteryMv >= 2500 &&
         previousMeasuredBatteryMv > measuredMv &&
         previousMeasuredBatteryMv - measuredMv >= BATTERY_FAST_DROP_MV;
+    const bool dropFromChargingPeak =
+        charging && chargingPeakMv > measuredMv &&
+        chargingPeakMv - measuredMv >= BATTERY_FAST_DROP_MV;
+    if (charging && estimatedBatteryPercent >= 98.0f &&
+        measuredMv < BATTERY_FULL_UNPLUG_MV) {
+        if (fullUnplugConfirmSamples < UINT8_MAX) {
+            ++fullUnplugConfirmSamples;
+        }
+    } else {
+        fullUnplugConfirmSamples = 0;
+    }
+    const bool fullChargeCableRemoved =
+        fullUnplugConfirmSamples >= BATTERY_CHARGE_CONFIRM_SAMPLES;
+    const bool chargerRemoved = fastVoltageDrop || dropFromChargingPeak ||
+                                fullChargeCableRemoved;
 
     if (filteredBatteryMv == 0.0f) {
         filteredBatteryMv = measuredBatteryMv;
     } else {
-        const float alpha = fastVoltageDrop
+        const float alpha = chargerRemoved
                                 ? 1.0f
                                 : (measuredBatteryMv < filteredBatteryMv
                                        ? BATTERY_VOLTAGE_FALL_ALPHA
                                        : BATTERY_VOLTAGE_RISE_ALPHA);
         filteredBatteryMv += alpha * (measuredBatteryMv - filteredBatteryMv);
     }
-    const uint16_t publishedMv = (uint16_t)constrain(
+    uint16_t publishedMv = (uint16_t)constrain(
         lroundf(filteredBatteryMv), 0L, 5000L);
-    const float voltagePercent =
+    float voltagePercent =
         (float)batteryPercentFromMillivolts(publishedMv);
+    const uint32_t elapsedMs = previousUpdateMs == 0
+                                   ? BATTERY_UPDATE_MS
+                                   : nowMs - previousUpdateMs;
 
     if (estimatedBatteryPercent < 0.0f) {
         estimatedBatteryPercent = voltagePercent;
-        batteryRiseLimited = false;
-    } else if (fastVoltageDrop) {
+        batteryChargingEstimated = false;
+    } else if (chargerRemoved) {
         // USB removal normally causes a clear downward terminal-voltage step.
-        // Snap to the battery-only voltage estimate before applying any rise
-        // limiter; it may still be above an intentionally conservative SOC.
+        // Snap to the battery-only OCV estimate and leave charging mode.
+        filteredBatteryMv = measuredBatteryMv;
+        publishedMv = measuredMv;
+        voltagePercent = (float)batteryPercentFromMillivolts(publishedMv);
         estimatedBatteryPercent = voltagePercent;
-        batteryRiseLimited = false;
-    } else if (voltagePercent > estimatedBatteryPercent) {
-        const uint32_t elapsedMs = previousUpdateMs == 0
-                                       ? BATTERY_UPDATE_MS
-                                       : nowMs - previousUpdateMs;
-        const float maximumRise =
-            100.0f * (float)elapsedMs /
-            (float)BATTERY_MIN_FULL_CHARGE_MS;
-        const float nextEstimate = min(voltagePercent,
-                                       estimatedBatteryPercent + maximumRise);
-        batteryRiseLimited =
-            voltagePercent - nextEstimate >= 0.5f;
-        estimatedBatteryPercent = nextEstimate;
-    } else if (voltagePercent + BATTERY_SOC_HYSTERESIS_PERCENT <
-               estimatedBatteryPercent) {
-        estimatedBatteryPercent +=
-            BATTERY_SOC_FALL_ALPHA *
-            (voltagePercent - estimatedBatteryPercent);
-        batteryRiseLimited = false;
+        charging = false;
+        chargeCandidate = false;
+        chargeConfirmSamples = 0;
+        fullUnplugConfirmSamples = 0;
+        batteryChargingEstimated = false;
+    } else if (charging) {
+        chargingPeakMv = max(chargingPeakMv, measuredMv);
+        estimatedBatteryPercent = advanceBatteryChargeEstimate(
+            estimatedBatteryPercent, elapsedMs);
+        batteryChargingEstimated = true;
     } else {
-        batteryRiseLimited = false;
+        const bool newChargeStep =
+            previousMeasuredBatteryMv >= 2500 &&
+            measuredMv >= previousMeasuredBatteryMv + BATTERY_CHARGE_STEP_MV;
+
+        if (!chargeCandidate && newChargeStep) {
+            chargeCandidate = true;
+            chargeConfirmSamples = 1;
+            preChargeBatteryMv = previousMeasuredBatteryMv;
+            preChargeBatteryPercent = estimatedBatteryPercent;
+            chargeCandidateStartedMs = nowMs;
+        } else if (chargeCandidate) {
+            if (measuredMv >= preChargeBatteryMv + BATTERY_CHARGE_HOLD_MV) {
+                if (chargeConfirmSamples < UINT8_MAX) ++chargeConfirmSamples;
+            } else {
+                chargeCandidate = false;
+                chargeConfirmSamples = 0;
+            }
+        }
+
+        if (chargeCandidate &&
+            chargeConfirmSamples >= BATTERY_CHARGE_CONFIRM_SAMPLES) {
+            charging = true;
+            chargingPeakMv = measuredMv;
+            chargeCandidate = false;
+            chargeConfirmSamples = 0;
+            // Include the short confirmation interval without ever using the
+            // charge-biased voltage as a percentage.
+            estimatedBatteryPercent = advanceBatteryChargeEstimate(
+                preChargeBatteryPercent, nowMs - chargeCandidateStartedMs);
+            batteryChargingEstimated = true;
+        } else if (chargeCandidate) {
+            // Hold the last battery-only result during the 15 s confirmation.
+            estimatedBatteryPercent = preChargeBatteryPercent;
+            batteryChargingEstimated = false;
+        } else if (voltagePercent >
+                   estimatedBatteryPercent + BATTERY_SOC_HYSTERESIS_PERCENT) {
+            estimatedBatteryPercent +=
+                BATTERY_SOC_RISE_ALPHA *
+                (voltagePercent - estimatedBatteryPercent);
+            batteryChargingEstimated = false;
+        } else if (voltagePercent + BATTERY_SOC_HYSTERESIS_PERCENT <
+                   estimatedBatteryPercent) {
+            estimatedBatteryPercent +=
+                BATTERY_SOC_FALL_ALPHA *
+                (voltagePercent - estimatedBatteryPercent);
+            batteryChargingEstimated = false;
+        } else {
+            batteryChargingEstimated = false;
+        }
     }
 
     batteryVoltageMv = publishedMv;
@@ -877,12 +971,16 @@ void updateUi() {
     // when its displayed value changes (normally once every five seconds).
     static uint8_t lastBatteryPercent = 0xff;
     static bool lastBatteryValid = false;
+    static bool lastBatteryCharging = false;
     const uint8_t shownBatteryPercent = batteryPercent;
     const bool shownBatteryValid = batteryReadingValid;
+    const bool shownBatteryCharging = batteryChargingEstimated;
     if (themeChanged || shownBatteryPercent != lastBatteryPercent ||
-        shownBatteryValid != lastBatteryValid) {
+        shownBatteryValid != lastBatteryValid ||
+        shownBatteryCharging != lastBatteryCharging) {
         lastBatteryPercent = shownBatteryPercent;
         lastBatteryValid = shownBatteryValid;
+        lastBatteryCharging = shownBatteryCharging;
         constexpr int16_t batX = 188, batY = 433;
         constexpr int16_t batW = 91, batH = 13;
         const bool dark = darkTheme;
@@ -907,6 +1005,7 @@ void updateUi() {
         canvas->setCursor(batX + 29, batY + 4);
         if (shownBatteryValid) {
             canvas->printf("%u%%", (unsigned)shownBatteryPercent);
+            if (shownBatteryCharging) canvas->print(" CHG");
         } else {
             canvas->print("BAT --");
         }
@@ -1138,7 +1237,7 @@ void loop() {
         const uint32_t uiAgeMs = now - lastUiFrameMs;
         const uint16_t uiMaxMs = maxUiDrawMs;
         maxUiDrawMs = 0;
-        Serial.printf("[SENSOR] adc=%ld delta=%ld mV=%lu zero_mV=%lu mmHg=%.2f sat=%u sps=%u ui_fps=%u ui_age=%lu ui_max=%u bpm=%u bat=%umV/%u%% rise_limited=%u\n",
+        Serial.printf("[SENSOR] adc=%ld delta=%ld mV=%lu zero_mV=%lu mmHg=%.2f sat=%u sps=%u ui_fps=%u ui_age=%lu ui_max=%u bpm=%u bat=%umV/%u%% charge_est=%u\n",
                       (long)raw, (long)(raw - zeroRaw),
                       (unsigned long)milliVolts,
                       (unsigned long)zeroMilliVolts, pressure,
@@ -1146,7 +1245,7 @@ void loop() {
                       (unsigned long)uiAgeMs, (unsigned)uiMaxMs,
                       (unsigned)fakeBpm, (unsigned)batteryVoltageMv,
                       (unsigned)batteryPercent,
-                      batteryRiseLimited ? 1U : 0U);
+                      batteryChargingEstimated ? 1U : 0U);
     }
     delay(20);
 }

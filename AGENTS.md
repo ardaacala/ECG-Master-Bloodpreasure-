@@ -21,8 +21,8 @@ Version 2 behavior unless the user explicitly requests a hardware migration.
   as part of unrelated changes.
 - The pressure sensor expects nominal 0.2–2.7 V for 0–40 kPa and startup auto-zero.
 - ETA6098 `STAT` is not routed to an ESP32 GPIO on this board. Do not claim exact
-  charger detection from software. Preserve the asymmetric battery estimator:
-  physically rate-limited increases and fast USB-removal/downward correction.
+  charger detection from software. Preserve the charge estimator's 82 kOhm
+  ISET/500 mA, 1500 mAh CC/CV model and fast USB-removal/OCV correction.
 - `slave1_wifi` is logical device 1, GPIO2 active-high in its default environment.
 - `slave2_ble` is logical device 2, advertises `LED_NODE_1`, GPIO4 active-low.
 
