@@ -67,7 +67,7 @@ constexpr uint16_t FAKE_RANGE_EXIT_DEBOUNCE_MS = 300;
 // The measured cuff oscillations are typically only a few tenths of a mmHg.
 // Keep the simulator in that range instead of drawing an exaggerated 2 mmHg
 // pressure excursion.
-constexpr float FAKE_PULSE_AMPLITUDE_MMHG = 1.0f;
+constexpr float FAKE_PULSE_AMPLITUDE_MMHG = 1.5f;
 constexpr uint16_t DEFAULT_FAKE_BPM = 72;
 constexpr uint16_t DEFAULT_FAKE_MAX_PRESSURE_MMHG = 130;
 constexpr uint16_t DEFAULT_FAKE_MIN_PRESSURE_MMHG = 30;
@@ -827,7 +827,7 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
         }
     }
 
-    // Every beat uses the same fixed 1.0 mmHg peak. Duration scales with the
+    // Every beat uses the same fixed 1.5 mmHg peak. Duration scales with the
     // configured BPM so high rates cannot overlap into a continuous wobble.
     const uint32_t pulseDurationMs = min<uint32_t>(520, periodMs * 65 / 100);
     const int64_t ageUs = nowUs - displayedBeatAtUs;
@@ -943,7 +943,7 @@ void updateUi() {
         const float difference = basePressure - filteredUiBasePressure;
         // Strong filtering for ADC jitter, faster tracking while the cuff is
         // actively inflated/deflated. The synthetic pulse is added afterwards
-        // so its timestamp and fixed 1.0 mmHg amplitude are not attenuated.
+        // so its timestamp and fixed 1.5 mmHg amplitude are not attenuated.
         // These faster coefficients remove the former "low FPS" feeling while
         // retaining enough filtering to stop single-sample needle chatter.
         const float alpha = fabsf(difference) > 3.0f ? 0.65f : 0.20f;
