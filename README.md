@@ -19,6 +19,8 @@ slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 - Açık/koyu tema ve 2 saniye basılı tutarak ekran açma/kapatma.
 - Filtreli batarya voltajı ve lookup-table tabanlı yüzde göstergesi.
 
+- QMI8658 hareket algılamasıyla 5 dakika hareketsizlikte otomatik düşük güç bekleme.
+
 ## Donanım ve pinler
 
 | İşlev | Pin / bilgi |
@@ -36,8 +38,25 @@ Aktif topoloji:
 - Wi-Fi slave: mantıksal ID 1, varsayılan GPIO2 active-high.
 - BLE slave: mantıksal ID 2, reklam adı `LED_NODE_1`, GPIO4 active-low.
 
-GPIO47/48 QMI8658 ile ortak kart içi I²C hattıdır. Firmware yalnızca dokunmatik
-denetleyiciye erişir; IMU pinleri veya kayıtları değiştirilmez.
+GPIO47/48, dokunmatik ve QMI8658 tarafından paylaşılan kart içi I²C hattıdır.
+QMI8658'in kartta bağlı `INT1` çıkışı GPIO8'e gider.
+
+## Harekete duyarlı bekleme modu
+
+QMI8658, normal çalışmada fiziksel hareketi 10 Hz düşük güçlü ivme örnekleriyle
+izler; ekran dokunuşu da kullanıcı aktivitesi sayılır. Her fiziksel hareket veya
+dokunma beş dakikalık sayacı baştan başlatır. Son aktiviteden itibaren beş dakika
+geçerse yeni tetikler engellenir,
+ekran uyutulur ve ESP32-S3 deep sleep'e girer; bu durumda iki CPU çekirdeği ile
+Wi-Fi/BLE radyo alanları kapalıdır. Yalnızca QMI8658'in 21 Hz düşük güç
+ivmeölçeri çalışır. Hareket, QMI8658 `INT1` -> GPIO8 hattıyla kartı uyandırır
+ve normal çalışma yeniden başlar. BLE'den girilen BPM/basınç aralığı ve tema
+RTC belleğinde tutulduğu için bu uyanmada kaybolmaz.
+
+Jiroskop, QMI8658'in düşük güç ivmeölçer modunda donanım gereği kapalıdır.
+Bu, aynı hareketle uyanma işlevini daha az batarya tüketimiyle sağlar. IMU
+başlatılamazsa cihazın uyanamayacağı bir duruma girmemesi için otomatik bekleme
+devre dışı kalır.
 
 ## BLE telefon kontrolü
 

@@ -4,6 +4,7 @@
 #include <Arduino_GFX_Library.h>
 #include <Wire.h>
 #include "esp_heap_caps.h"
+#include "esp_sleep.h"
 #include "esp_timer.h"
 #include <Preferences.h>
 #include "config.h"
@@ -89,7 +90,8 @@ constexpr uint16_t ZERO_SAMPLE_COUNT = 250;
 constexpr uint8_t LCD_CS = 9, LCD_PCLK = 10, LCD_D0 = 11, LCD_D1 = 12;
 constexpr uint8_t LCD_D2 = 13, LCD_D3 = 14, LCD_RST = 21;
 // FT3168/FT6146 touch controller and QMI8658 share this onboard I2C bus.
-// Only the touch address is accessed here; the IMU wiring is left untouched.
+// Both are accessed from Arduino loop/Core 0 so their transactions cannot
+// collide with the priority UI task on Core 1.
 constexpr uint8_t TOUCH_SDA_PIN = 47, TOUCH_SCL_PIN = 48;
 constexpr uint8_t TOUCH_I2C_ADDRESS = 0x38;
 constexpr uint16_t TOUCH_POLL_INTERVAL_MS = 25;
@@ -98,7 +100,51 @@ constexpr uint8_t TOUCH_FAILURE_LIMIT = 3;
 constexpr int16_t SWIPE_MIN_DISTANCE = 70;
 constexpr uint16_t SWIPE_MAX_DURATION_MS = 1000;
 constexpr uint16_t SCREEN_HOLD_TOGGLE_MS = 2000;
+// QMI8658 INT1 is routed to GPIO8 on this exact board. Wake-on-Motion uses
+// the accelerometer's low-power engine; the gyroscope must stay disabled for
+// that mode according to the sensor data sheet.
+constexpr uint8_t IMU_INT_PIN = 8;
+constexpr uint8_t QMI8658_ADDRESS_HIGH = 0x6B;
+constexpr uint8_t QMI8658_ADDRESS_LOW = 0x6A;
+constexpr uint8_t QMI8658_WHO_AM_I = 0x05;
+constexpr uint8_t QMI8658_REG_WHO_AM_I = 0x00;
+constexpr uint8_t QMI8658_REG_CTRL1 = 0x02;
+constexpr uint8_t QMI8658_REG_CTRL2 = 0x03;
+constexpr uint8_t QMI8658_REG_CTRL7 = 0x08;
+constexpr uint8_t QMI8658_REG_CTRL9 = 0x0A;
+constexpr uint8_t QMI8658_REG_CAL1_L = 0x0B;
+constexpr uint8_t QMI8658_REG_CAL1_H = 0x0C;
+constexpr uint8_t QMI8658_REG_STATUS_INT = 0x2D;
+constexpr uint8_t QMI8658_REG_STATUS1 = 0x2F;
+constexpr uint8_t QMI8658_REG_AX_L = 0x35;
+constexpr uint8_t QMI8658_STATUS1_CMD_DONE = 0x01;
+constexpr uint8_t QMI8658_STATUS1_WOM = 0x04;
+constexpr uint8_t QMI8658_STATUS_INT_CMD_DONE = 0x80;
+constexpr uint8_t QMI8658_CTRL9_NOP = 0x00;
+constexpr uint8_t QMI8658_CTRL9_WRITE_WOM = 0x08;
+constexpr uint8_t QMI8658_CTRL1_INT1_PUSH_PULL = 0x08;
+constexpr uint8_t QMI8658_CTRL1_AUTO_INCREMENT = 0x40;
+constexpr uint8_t QMI8658_ACCEL_21HZ_LOW_POWER = 0x0D;
+constexpr uint8_t QMI8658_WOM_THRESHOLD_MG = 50;
+constexpr uint8_t QMI8658_WOM_BLANKING_SAMPLES = 8;
+constexpr uint16_t QMI8658_WOM_REARM_DELAY_MS = 450;
+constexpr uint16_t IMU_ACTIVITY_SAMPLE_MS = 100;
+// +/-2 g gives 16384 LSB/g. About 11 mg catches slow hand movement while
+// remaining above the stationary low-power accelerometer noise floor.
+constexpr int32_t IMU_ACTIVITY_DELTA_LSB = 180;
+constexpr uint32_t STANDBY_TIMEOUT_MS = 5UL * 60UL * 1000UL;
+constexpr uint32_t STANDBY_SETTINGS_MAGIC = 0x42505332;
 constexpr int16_t SCREEN_W = 466, SCREEN_H = 466;
+
+struct StandbyRetainedSettings {
+    uint32_t magic;
+    uint16_t bpm;
+    uint16_t systolicMmHg;
+    uint16_t diastolicMmHg;
+    uint8_t darkTheme;
+};
+
+RTC_DATA_ATTR StandbyRetainedSettings standbyRetainedSettings = {};
 
 Arduino_DataBus *bus = nullptr;
 Arduino_GFX *display = nullptr;
@@ -121,9 +167,10 @@ volatile uint16_t fakeBpm = DEFAULT_FAKE_BPM;
 volatile uint16_t fakeMaxPressureMmHg = DEFAULT_FAKE_MAX_PRESSURE_MMHG;
 volatile uint16_t fakeMinPressureMmHg = DEFAULT_FAKE_MIN_PRESSURE_MMHG;
 volatile uint32_t fakeBpmRevision = 0;
-// Incremented only when the configured upper pressure boundary is crossed.
-// The UI uses it to discard an event that may already have become visible.
-volatile uint32_t fakeUiUpperCancelRevision = 0;
+// Incremented whenever a pressure boundary invalidates an already queued or
+// visible synthetic event. The UI consumes the event instead of showing it
+// later after the pressure/range changes.
+volatile uint32_t fakeUiCancelRevision = 0;
 volatile bool fakePulseMode = false;
 volatile uint32_t visiblePulseCount = 0;
 volatile uint16_t measuredSps = 0;
@@ -139,6 +186,10 @@ volatile uint32_t themeRevision = 0;
 volatile bool requestedScreenOn = true;
 volatile uint32_t screenPowerRevision = 0;
 bool touchAvailable = false;
+bool imuMotionWakeAvailable = false;
+uint8_t qmi8658Address = 0;
+uint32_t lastMotionActivityMs = 0;
+volatile bool standbyEntering = false;
 uint32_t lastSerialMs = 0;
 float lastNeedlePressure = -1.0f;
 uint32_t networkEventId = 0;
@@ -353,6 +404,7 @@ bool sendPulseTrigger(PulseType pulseType = PULSE_LARGE,
                       uint64_t targetMask = 0,
                       int64_t *executeAtResultUs = nullptr,
                       uint32_t *eventIdResult = nullptr) {
+    if (standbyEntering) return false;
     const int64_t executeAtUs = esp_timer_get_time() +
                                 FIXED_TRIGGER_LEAD_US;
     uint32_t eventId = 0;
@@ -473,7 +525,9 @@ bool readTouchPoint(int16_t &x, int16_t &y, bool &pressed) {
     if (!touchAvailable) return false;
     Wire.beginTransmission(TOUCH_I2C_ADDRESS);
     Wire.write((uint8_t)0x02); // number of points, then first point coordinates
-    if (Wire.endTransmission(false) != 0) return false;
+    // Both onboard I2C devices retain their register pointer across STOP.
+    // Avoid the Arduino I2C driver's sporadic repeated-start INVALID_STATE.
+    if (Wire.endTransmission(true) != 0) return false;
     if (Wire.requestFrom(TOUCH_I2C_ADDRESS, (uint8_t)5) != 5) return false;
     const uint8_t points = Wire.read() & 0x0f;
     const uint8_t xh = Wire.read();
@@ -494,6 +548,284 @@ bool initializeTouchBus(bool restartBus) {
     Wire.setTimeOut(10);
     Wire.beginTransmission(TOUCH_I2C_ADDRESS);
     return Wire.endTransmission() == 0;
+}
+
+bool qmi8658ReadRegisterAt(uint8_t address, uint8_t reg, uint8_t &value) {
+    Wire.beginTransmission(address);
+    Wire.write(reg);
+    // QMI8658 retains the register pointer across STOP. Avoiding a repeated
+    // start here keeps the shared Arduino I2C peripheral out of the sporadic
+    // INVALID_STATE seen when touch and IMU no-stop reads were interleaved.
+    if (Wire.endTransmission(true) != 0) return false;
+    if (Wire.requestFrom(address, (uint8_t)1) != 1) return false;
+    value = Wire.read();
+    return true;
+}
+
+bool qmi8658ReadRegister(uint8_t reg, uint8_t &value) {
+    return qmi8658Address != 0 &&
+           qmi8658ReadRegisterAt(qmi8658Address, reg, value);
+}
+
+bool qmi8658ReadRegisters(uint8_t reg, uint8_t *values, uint8_t count) {
+    if (qmi8658Address == 0 || values == nullptr || count == 0) return false;
+    Wire.beginTransmission(qmi8658Address);
+    Wire.write(reg);
+    if (Wire.endTransmission(true) != 0) return false;
+    if (Wire.requestFrom(qmi8658Address, count) != count) return false;
+    for (uint8_t i = 0; i < count; ++i) values[i] = Wire.read();
+    return true;
+}
+
+bool qmi8658WriteRegister(uint8_t reg, uint8_t value) {
+    if (qmi8658Address == 0) return false;
+    Wire.beginTransmission(qmi8658Address);
+    Wire.write(reg);
+    Wire.write(value);
+    return Wire.endTransmission() == 0;
+}
+
+bool qmi8658ExecuteCtrl9(uint8_t command) {
+    if (!qmi8658WriteRegister(QMI8658_REG_CTRL9, command)) return false;
+    const uint32_t startedMs = millis();
+    while (millis() - startedMs < 100) {
+        uint8_t statusInt = 0;
+        if (qmi8658ReadRegister(QMI8658_REG_STATUS_INT, statusInt) &&
+            (statusInt & QMI8658_STATUS_INT_CMD_DONE) != 0) {
+            // Current QMI firmware requires NOP after STATUSINT.bit7 rises,
+            // followed by waiting for the bit to clear. This is the protocol
+            // used by Waveshare's current driver.
+            if (!qmi8658WriteRegister(QMI8658_REG_CTRL9,
+                                      QMI8658_CTRL9_NOP)) return false;
+            const uint32_t ackStartedMs = millis();
+            while (millis() - ackStartedMs < 100) {
+                if (qmi8658ReadRegister(QMI8658_REG_STATUS_INT, statusInt) &&
+                    (statusInt & QMI8658_STATUS_INT_CMD_DONE) == 0) {
+                    return true;
+                }
+                delay(1);
+            }
+            return false;
+        }
+
+        uint8_t status1 = 0;
+        if (qmi8658ReadRegister(QMI8658_REG_STATUS1, status1) &&
+            (status1 & QMI8658_STATUS1_CMD_DONE) != 0) {
+            // Backward compatibility for older revisions whose STATUS1 read
+            // itself acknowledges CmdDone and releases INT1.
+            return true;
+        }
+        delay(1);
+    }
+    return false;
+}
+
+bool configureMotionWakeSensor() {
+    const uint8_t womControl = QMI8658_WOM_BLANKING_SAMPLES & 0x3F;
+    return qmi8658WriteRegister(QMI8658_REG_CTRL7, 0x00) &&
+           qmi8658WriteRegister(QMI8658_REG_CTRL2,
+                                QMI8658_ACCEL_21HZ_LOW_POWER) &&
+           qmi8658WriteRegister(QMI8658_REG_CAL1_L,
+                                QMI8658_WOM_THRESHOLD_MG) &&
+           qmi8658WriteRegister(QMI8658_REG_CAL1_H, womControl) &&
+           qmi8658ExecuteCtrl9(QMI8658_CTRL9_WRITE_WOM) &&
+           qmi8658WriteRegister(QMI8658_REG_CTRL7, 0x01);
+}
+
+bool configureMotionTrackingSensor() {
+    // Threshold zero exits the one-shot WoM mode and returns INT1 inactive.
+    // Normal operation then reads only the low-power accelerometer at 10 Hz;
+    // the gyro, UI task and radio tasks are not touched by this polling path.
+    return qmi8658WriteRegister(QMI8658_REG_CTRL7, 0x00) &&
+           qmi8658WriteRegister(QMI8658_REG_CTRL2,
+                                QMI8658_ACCEL_21HZ_LOW_POWER) &&
+           qmi8658WriteRegister(QMI8658_REG_CAL1_L, 0x00) &&
+           qmi8658WriteRegister(QMI8658_REG_CAL1_H, 0x00) &&
+           qmi8658ExecuteCtrl9(QMI8658_CTRL9_WRITE_WOM) &&
+           qmi8658WriteRegister(QMI8658_REG_CTRL7, 0x01);
+}
+
+bool initializeMotionWake() {
+    pinMode(IMU_INT_PIN, INPUT);
+    qmi8658Address = 0;
+    for (const uint8_t address : {QMI8658_ADDRESS_HIGH,
+                                  QMI8658_ADDRESS_LOW}) {
+        uint8_t whoAmI = 0;
+        if (qmi8658ReadRegisterAt(address, QMI8658_REG_WHO_AM_I, whoAmI) &&
+            whoAmI == QMI8658_WHO_AM_I) {
+            qmi8658Address = address;
+            break;
+        }
+    }
+    if (qmi8658Address == 0) {
+        Serial.println("[STANDBY] QMI8658 not found; auto-standby disabled");
+        return false;
+    }
+
+    // QMI8658A defaults INT1 to high impedance. GPIO8 cannot receive the WoM
+    // level unless INT1 is explicitly switched to push-pull output mode.
+    uint8_t ctrl1 = 0;
+    if (!qmi8658ReadRegister(QMI8658_REG_CTRL1, ctrl1) ||
+        !qmi8658WriteRegister(
+            QMI8658_REG_CTRL1,
+            ctrl1 | QMI8658_CTRL1_INT1_PUSH_PULL |
+                QMI8658_CTRL1_AUTO_INCREMENT)) {
+        Serial.println("[STANDBY] QMI8658 INT1 setup failed; auto-standby disabled");
+        qmi8658Address = 0;
+        return false;
+    }
+
+    // Clear a retained WoM/CmdDone condition after a deep-sleep wake or reset.
+    uint8_t ignoredStatus = 0;
+    qmi8658ReadRegister(QMI8658_REG_STATUS1, ignoredStatus);
+
+    // Data-sheet WoM sequence: disable sensors, select +/-2 g at 21 Hz low
+    // power, set threshold and INT1 initial-low routing, commit through CTRL9,
+    // then enable only the accelerometer. Eight samples blank startup noise.
+    if (!configureMotionTrackingSensor()) {
+        Serial.println("[STANDBY] QMI8658 motion tracking setup failed; auto-standby disabled");
+        qmi8658Address = 0;
+        return false;
+    }
+
+    lastMotionActivityMs = millis();
+    Serial.printf("[STANDBY] QMI8658 0x%02X physical motion ready on GPIO%u, timeout=5 min\n",
+                  qmi8658Address, IMU_INT_PIN);
+    return true;
+}
+
+void noteMotionActivity() {
+    lastMotionActivityMs = millis();
+}
+
+void updateMotionActivity() {
+    if (!imuMotionWakeAvailable || standbyEntering) return;
+    static uint32_t lastSampleMs = 0;
+    static bool haveReferenceSample = false;
+    static int16_t reference[3] = {};
+    const uint32_t nowMs = millis();
+    if (nowMs - lastSampleMs < IMU_ACTIVITY_SAMPLE_MS) return;
+    lastSampleMs = nowMs;
+
+    uint8_t data[6] = {};
+    if (!qmi8658ReadRegisters(QMI8658_REG_AX_L, data, sizeof(data))) return;
+    const int16_t current[3] = {
+        (int16_t)((uint16_t)data[1] << 8 | data[0]),
+        (int16_t)((uint16_t)data[3] << 8 | data[2]),
+        (int16_t)((uint16_t)data[5] << 8 | data[4])
+    };
+    if (haveReferenceSample) {
+        // Compare against the position at the last accepted movement. Do not
+        // move the reference on every sample: otherwise a slow pickup can be
+        // split into tiny steps and never reset the inactivity timer.
+        const int32_t dx = (int32_t)current[0] - reference[0];
+        const int32_t dy = (int32_t)current[1] - reference[1];
+        const int32_t dz = (int32_t)current[2] - reference[2];
+        const int64_t thresholdSquared =
+            (int64_t)IMU_ACTIVITY_DELTA_LSB * IMU_ACTIVITY_DELTA_LSB;
+        const int64_t deltaSquared = (int64_t)dx * dx +
+                                     (int64_t)dy * dy +
+                                     (int64_t)dz * dz;
+        if (deltaSquared >= thresholdSquared) {
+            noteMotionActivity();
+            reference[0] = current[0];
+            reference[1] = current[1];
+            reference[2] = current[2];
+        }
+    } else {
+        reference[0] = current[0];
+        reference[1] = current[1];
+        reference[2] = current[2];
+        haveReferenceSample = true;
+    }
+}
+
+void restoreFromStandbyAbort() {
+    standbyEntering = false;
+    noteMotionActivity();
+    requestedScreenOn = true;
+    screenPowerRevision = screenPowerRevision + 1;
+    if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
+}
+
+void enterMotionStandby() {
+    if (!imuMotionWakeAvailable || standbyEntering) return;
+
+    // A motion event may have arrived between the last 100 ms status poll and
+    // this function. Consume it and remain awake instead of racing sleep.
+    uint8_t status = 0;
+    if (qmi8658ReadRegister(QMI8658_REG_STATUS1, status) &&
+        (status & QMI8658_STATUS1_WOM) != 0) {
+        noteMotionActivity();
+        configureMotionTrackingSensor();
+        return;
+    }
+
+    standbyEntering = true;
+    fakePulseMode = false;
+    fakePressureOffset = 0.0f;
+    standbyRetainedSettings = {
+        STANDBY_SETTINGS_MAGIC,
+        (uint16_t)fakeBpm,
+        (uint16_t)fakeMaxPressureMmHg,
+        (uint16_t)fakeMinPressureMmHg,
+        (uint8_t)(darkTheme ? 1 : 0)
+    };
+
+    // Let the UI task issue the panel sleep command on its own dedicated core.
+    requestedScreenOn = false;
+    screenPowerRevision = screenPowerRevision + 1;
+    if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
+
+    // Reject all new triggers and allow the last already-transmitted,
+    // future-dated event to finish before the radios and CPUs power down.
+    const int64_t drainUntilUs = lastTriggerExecuteAtUs == 0
+        ? esp_timer_get_time() + 100000
+        : lastTriggerExecuteAtUs + LARGE_PULSE_DURATION_US + 20000;
+    while (esp_timer_get_time() < drainUntilUs) delay(10);
+
+    // Movement during the short drain window cancels standby cleanly.
+    status = 0;
+    if (digitalRead(IMU_INT_PIN) == HIGH ||
+        (qmi8658ReadRegister(QMI8658_REG_STATUS1, status) &&
+         (status & QMI8658_STATUS1_WOM) != 0)) {
+        configureMotionTrackingSensor();
+        restoreFromStandbyAbort();
+        return;
+    }
+
+    // The panel power transition can couple a one-off transient into the IMU.
+    // Rearm only after the display is off, then wait out the configured eight
+    // low-power accelerometer blanking samples before arming ESP deep sleep.
+    if (!configureMotionWakeSensor()) {
+        Serial.println("[STANDBY] QMI8658 sleep rearm failed");
+        restoreFromStandbyAbort();
+        return;
+    }
+    delay(QMI8658_WOM_REARM_DELAY_MS);
+    status = 0;
+    if (digitalRead(IMU_INT_PIN) == HIGH ||
+        (qmi8658ReadRegister(QMI8658_REG_STATUS1, status) &&
+         (status & QMI8658_STATUS1_WOM) != 0)) {
+        configureMotionTrackingSensor();
+        restoreFromStandbyAbort();
+        return;
+    }
+
+    const esp_err_t wakeResult =
+        esp_sleep_enable_ext0_wakeup((gpio_num_t)IMU_INT_PIN, HIGH);
+    if (wakeResult != ESP_OK) {
+        Serial.printf("[STANDBY] GPIO%u wake setup failed: %d\n",
+                      IMU_INT_PIN, (int)wakeResult);
+        restoreFromStandbyAbort();
+        return;
+    }
+
+    Serial.println("[STANDBY] no motion for 5 min; display/radios/triggers off");
+    Serial.flush();
+    // Deep sleep stops both cores and the Wi-Fi/BLE radio domains. QMI8658
+    // remains powered in accelerometer-only WoM mode and raises GPIO8 on motion.
+    esp_deep_sleep_start();
 }
 
 void updateTouchGesture() {
@@ -527,13 +859,15 @@ void updateTouchGesture() {
             consecutiveFailures = 0;
             touchAvailable = false;
             retryAfterMs = nowMs + TOUCH_RETRY_INTERVAL_MS;
-            Wire.end();
+            // Keep the shared bus alive for QMI8658. The scheduled recovery
+            // still performs an end/begin pair atomically in initializeTouchBus.
             Serial.println("[TOUCH] I2C paused after repeated errors");
         }
         return;
     }
     consecutiveFailures = 0;
     if (pressed) {
+        noteMotionActivity();
         if (!tracking) {
             tracking = true;
             holdHandled = false;
@@ -738,10 +1072,11 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
         fakePressureOffset = 0.0f;
     }
 
-    // The lower boundary is exclusive; the upper boundary is inclusive.
+    // Synthetic BPM exists only strictly between the BLE diastolic and
+    // systolic values: DIA < measured mmHg < SYS.
     const bool rawPressureInRange = !saturated &&
         realPressure > (float)fakeMinPressureMmHg &&
-        realPressure <= (float)fakeMaxPressureMmHg;
+        realPressure < (float)fakeMaxPressureMmHg;
     if (!rangeActive) {
         if (!rawPressureInRange) {
             fakePressureOffset = 0.0f;
@@ -767,7 +1102,7 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
             fakePulseMode = false;
             if (exitedAboveUpper) {
                 // Cancel a UI event already queued for the old valid range.
-                fakeUiUpperCancelRevision = fakeUiUpperCancelRevision + 1;
+                fakeUiCancelRevision = fakeUiCancelRevision + 1;
             }
             return;
         }
@@ -897,7 +1232,7 @@ void updateUi() {
     static uint32_t displayedPulseCount = 0;
     static uint32_t pulseLedUntilMs = 0;
     static bool pulseLedOn = false;
-    static uint32_t appliedUpperCancelRevision = 0;
+    static uint32_t appliedCancelRevision = 0;
     static float filteredUiBasePressure = -1.0f;
     static uint32_t appliedScreenPowerRevision = 0;
     static bool screenOn = true;
@@ -953,24 +1288,17 @@ void updateUi() {
         }
     }
     displayedGaugeBasePressure = filteredUiBasePressure;
-    // Final fail-closed UI gate. The sensor task already hides pulses outside
-    // the strict range, but its raw pressure can cross DIA before the filtered
-    // on-screen base needle does (or vice versa). Require both values to be in
-    // range so no synthetic ripple or UI LED can ever appear while the dial is
-    // visibly below DIA or above SYS.
-    const float strictPressure = (float)targetPressure;
-    const float lowerLimit = (float)fakeMinPressureMmHg;
-    const float upperLimit = (float)fakeMaxPressureMmHg;
-    const bool strictPressureInRange =
-        strictPressure > lowerLimit && strictPressure <= upperLimit;
-    const bool displayedBaseInRange =
-        filteredUiBasePressure > lowerLimit &&
-        filteredUiBasePressure <= upperLimit;
-    const bool fakeVisible = fakePulseMode && strictPressureInRange &&
-                             displayedBaseInRange;
+    // Final UI gate uses exactly the current measured value requested by the
+    // BLE contract: DIA < measured mmHg < SYS. Otherwise the added fake offset
+    // and its UI LED are both zero/hidden immediately.
+    const float measuredPressure = (float)targetPressure;
+    const bool fakeVisible = fakePulseMode &&
+        (float)fakeMinPressureMmHg < measuredPressure &&
+        measuredPressure < (float)fakeMaxPressureMmHg;
     const float pressure = constrain(filteredUiBasePressure +
                                      (fakeVisible
-                                          ? (float)fakePressureOffset
+                                          ? constrain((float)fakePressureOffset, 0.0f,
+                                                      FAKE_PULSE_AMPLITUDE_MMHG)
                                           : 0.0f),
                                      0.0f, GAUGE_MAX_MMHG);
 
@@ -1012,9 +1340,9 @@ void updateUi() {
 
     const uint32_t nowMs = millis();
     const uint32_t pulseCount = visiblePulseCount;
-    const uint32_t upperCancelRevision = fakeUiUpperCancelRevision;
-    if (upperCancelRevision != appliedUpperCancelRevision) {
-        appliedUpperCancelRevision = upperCancelRevision;
+    const uint32_t cancelRevision = fakeUiCancelRevision;
+    if (cancelRevision != appliedCancelRevision) {
+        appliedCancelRevision = cancelRevision;
         displayedPulseCount = pulseCount;
         pulseLedUntilMs = 0;
     } else if (!fakeVisible) {
@@ -1236,6 +1564,7 @@ void uiTask(void *) {
 
 void setup() {
     Serial.begin(115200);
+    const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
     Preferences settings;
     if (settings.begin("bp-sim", true)) {
         fakeBpm = constrain(settings.getUShort("bpm", DEFAULT_FAKE_BPM),
@@ -1247,6 +1576,18 @@ void setup() {
             settings.getUShort("min_mmhg", DEFAULT_FAKE_MIN_PRESSURE_MMHG),
             (uint16_t)1, (uint16_t)(fakeMaxPressureMmHg - 1));
         settings.end();
+    }
+    if (wakeCause == ESP_SLEEP_WAKEUP_EXT0 &&
+        standbyRetainedSettings.magic == STANDBY_SETTINGS_MAGIC) {
+        fakeBpm = constrain(standbyRetainedSettings.bpm,
+                            (uint16_t)30, (uint16_t)240);
+        fakeMaxPressureMmHg = constrain(standbyRetainedSettings.systolicMmHg,
+                                        (uint16_t)31, (uint16_t)300);
+        fakeMinPressureMmHg = constrain(
+            standbyRetainedSettings.diastolicMmHg,
+            (uint16_t)1, (uint16_t)(fakeMaxPressureMmHg - 1));
+        darkTheme = standbyRetainedSettings.darkTheme != 0;
+        Serial.println("[STANDBY] motion wake; restoring normal operation");
     }
     Serial.printf("[FAKE PULSE] current BPM=%u range=%u-%u mmHg\n",
                   (unsigned)fakeBpm, (unsigned)fakeMinPressureMmHg,
@@ -1261,6 +1602,7 @@ void setup() {
     Serial.printf("[TOUCH] I2C 0x%02X on GPIO%u/%u: %s\n",
                   TOUCH_I2C_ADDRESS, TOUCH_SDA_PIN, TOUCH_SCL_PIN,
                   touchAvailable ? "ready" : "not found");
+    imuMotionWakeAvailable = initializeMotionWake();
     wifiMasterBegin();
     bleMasterBegin();
     blePublishBpm(fakeBpm, fakeMaxPressureMmHg, fakeMinPressureMmHg);
@@ -1278,10 +1620,16 @@ void setup() {
 }
 
 void loop() {
+    updateMotionActivity();
     updateTouchGesture();
     BlePhoneCommand phoneCommand{};
     while (bleTakePhoneCommand(phoneCommand)) {
         if (phoneCommand.type == BLE_PHONE_SET_BPM) {
+            // Cancel the old range's synthetic display state before publishing
+            // new BLE limits. This prevents even one stale 30 Hz UI frame.
+            fakePulseMode = false;
+            fakePressureOffset = 0.0f;
+            fakeUiCancelRevision = fakeUiCancelRevision + 1;
             if (phoneCommand.hasPressureRange) {
                 fakeMaxPressureMmHg = phoneCommand.systolicMmHg;
                 fakeMinPressureMmHg = phoneCommand.diastolicMmHg;
@@ -1302,6 +1650,10 @@ void loop() {
         }
     }
     const uint32_t now = millis();
+    if (imuMotionWakeAvailable && !standbyEntering &&
+        now - lastMotionActivityMs >= STANDBY_TIMEOUT_MS) {
+        enterMotionStandby();
+    }
     if (Serial && now - lastSerialMs >= 500 &&
         zeroSamples >= ZERO_SAMPLE_COUNT) {
         lastSerialMs = now;
@@ -1311,13 +1663,17 @@ void loop() {
         const uint32_t uiAgeMs = now - lastUiFrameMs;
         const uint16_t uiMaxMs = maxUiDrawMs;
         maxUiDrawMs = 0;
-        Serial.printf("[SENSOR] adc=%ld delta=%ld mV=%lu zero_mV=%lu mmHg=%.2f sat=%u sps=%u ui_fps=%u ui_age=%lu ui_max=%u bpm=%u bat=%umV/%u%% charge_est=%u\n",
+        Serial.printf("[SENSOR] adc=%ld delta=%ld mV=%lu zero_mV=%lu mmHg=%.2f sat=%u sps=%u ui_fps=%u ui_age=%lu ui_max=%u bpm=%u range=%u-%u fake=%.2f bat=%umV/%u%% charge_est=%u\n",
                       (long)raw, (long)(raw - zeroRaw),
                       (unsigned long)milliVolts,
                       (unsigned long)zeroMilliVolts, pressure,
                       adcSaturated ? 1U : 0U, measuredSps, measuredUiFps,
                       (unsigned long)uiAgeMs, (unsigned)uiMaxMs,
-                      (unsigned)fakeBpm, (unsigned)batteryVoltageMv,
+                      (unsigned)fakeBpm,
+                      (unsigned)fakeMinPressureMmHg,
+                      (unsigned)fakeMaxPressureMmHg,
+                      (double)fakePressureOffset,
+                      (unsigned)batteryVoltageMv,
                       (unsigned)batteryPercent,
                       batteryChargingEstimated ? 1U : 0U);
     }

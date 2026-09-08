@@ -17,8 +17,15 @@
   sensör/ibre duraklamasını kaldırır ve ibre takip filtresinin gecikmesini azaltır.
 - Dokunmatik I²C hatalarında sürekli yeniden deneyip log/CPU flood oluşturmak
   yerine üç hatadan sonra 2 saniyelik backoff ve kontrollü bus recovery uygular.
-- UI ripple/LED görünürlüğünü hem anlık sensör basıncı hem filtrelenmiş ekrandaki
-  baz basınç için ayrı ayrı strict `DIA < P <= SYS` kontrolüyle fail-closed yapar.
+- Sahte ripple/LED görünürlüğünü doğrudan ölçülen basınca uygulanan strict
+  `DIA < P < SYS` koşuluyla sınırlar; BLE sınır değişiminde eski UI darbesini siler.
+
+- QMI8658 `INT1`/GPIO8 Wake-on-Motion ile 5 dakika hareketsizlikte ekran, CPU'lar,
+  Wi-Fi, BLE ve tetiklemeleri kapatan deep-sleep bekleme modu ekler.
+- Normal çalışmada fiziksel aktiviteyi hafif 10 Hz ivme örnekleriyle takip eder;
+  dokunmayı da aktivite sayar ve WoM'u yalnızca deep sleep öncesinde kurar.
+- Hareketle uyanmada çalışma ayarlarını RTC belleğinden geri yükler; IMU
+  başlatılamazsa güvenli biçimde otomatik beklemeyi devre dışı bırakır.
 
 ## 2.0.0 - 2026-09-08
 
