@@ -9,6 +9,14 @@
 - USB çıkarıldığında oluşan belirgin voltaj düşüşünü hızlı uygulayarak gerçek
   batarya değerine dönüşteki eski uzun filtre gecikmesini kaldırır.
 - Seri telemetriye `charge_est` tanı alanını ekler.
+- Alt/üst basınç sınırının dışında kadran ripple'ını ve UI nabız LED'ini anında
+  gizler; 300 ms sınır debounce'u yalnız BPM zaman çizelgesini korur.
+- Sentetik ripple tepesini her beat için değişmeyen `1.0 mmHg` yapar; süresi BPM
+  periyoduna göre ölçeklenmeye devam eder.
+- 32 BAT_ADC okumasını tek blok yerine 20 ms aralıklarla dağıtarak periyodik
+  sensör/ibre duraklamasını kaldırır ve ibre takip filtresinin gecikmesini azaltır.
+- Dokunmatik I²C hatalarında sürekli yeniden deneyip log/CPU flood oluşturmak
+  yerine üç hatadan sonra 2 saniyelik backoff ve kontrollü bus recovery uygular.
 
 ## 2.0.0 - 2026-09-08
 

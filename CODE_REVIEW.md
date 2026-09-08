@@ -9,6 +9,10 @@ Her değişiklikten sonra aşağıdakileri kontrol edin:
 - Global 200 ms duplicate guard korunuyor mu?
 - Gerçek cuff nabız algılayıcısı yanlışlıkla tekrar etkinleştirildi mi?
 - Sentetik nabız yalnızca ayarlanan alt/üst basınç aralığında mı?
+- Sınır debounce'u aktifken bile aralık dışında ripple ve UI LED tamamen gizli mi?
+- Ripple tepesi her beat'te sabit 1.0 mmHg ve süresi BPM periyoduyla sınırlı mı?
+- BAT_ADC örnekleri burst yerine zamana yayılmış mı?
+- Dokunmatik I²C arızasında sıkı retry/log döngüsü yerine backoff çalışıyor mu?
 - BLE adı master ve `slave2_ble` içinde aynı mı (`LED_NODE_1`)?
 - Wi-Fi ve BLE packed paket boyutları karşı uçlarla aynı mı?
 - GPIO2 basınç sensörü ve GPIO4 BAT_ADC çakışmadan korunuyor mu?

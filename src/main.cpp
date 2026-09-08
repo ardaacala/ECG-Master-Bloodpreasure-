@@ -20,6 +20,7 @@ constexpr uint8_t PRESSURE_ADC_PIN = 2;
 constexpr float BATTERY_DIVIDER_RATIO = 3.0f;
 constexpr uint32_t BATTERY_UPDATE_MS = 5000;
 constexpr uint8_t BATTERY_SAMPLE_COUNT = 32;
+constexpr uint16_t BATTERY_SAMPLE_SPACING_MS = 20;
 // The schematic fits 82 kOhm at ETA6098 ISET, which programs 0.5 A. While
 // charging, BAT_ADC is a terminal/charger voltage and is not a usable OCV SOC
 // reading. Detect its sustained connection step, retain the pre-charge SOC,
@@ -66,7 +67,7 @@ constexpr uint16_t FAKE_RANGE_EXIT_DEBOUNCE_MS = 300;
 // The measured cuff oscillations are typically only a few tenths of a mmHg.
 // Keep the simulator in that range instead of drawing an exaggerated 2 mmHg
 // pressure excursion.
-constexpr float FAKE_PULSE_AMPLITUDE_MMHG = 0.6f;
+constexpr float FAKE_PULSE_AMPLITUDE_MMHG = 1.0f;
 constexpr uint16_t DEFAULT_FAKE_BPM = 72;
 constexpr uint16_t DEFAULT_FAKE_MAX_PRESSURE_MMHG = 130;
 constexpr uint16_t DEFAULT_FAKE_MIN_PRESSURE_MMHG = 30;
@@ -91,6 +92,9 @@ constexpr uint8_t LCD_D2 = 13, LCD_D3 = 14, LCD_RST = 21;
 // Only the touch address is accessed here; the IMU wiring is left untouched.
 constexpr uint8_t TOUCH_SDA_PIN = 47, TOUCH_SCL_PIN = 48;
 constexpr uint8_t TOUCH_I2C_ADDRESS = 0x38;
+constexpr uint16_t TOUCH_POLL_INTERVAL_MS = 25;
+constexpr uint16_t TOUCH_RETRY_INTERVAL_MS = 2000;
+constexpr uint8_t TOUCH_FAILURE_LIMIT = 3;
 constexpr int16_t SWIPE_MIN_DISTANCE = 70;
 constexpr uint16_t SWIPE_MAX_DURATION_MS = 1000;
 constexpr uint16_t SCREEN_HOLD_TOGGLE_MS = 2000;
@@ -184,13 +188,32 @@ float advanceBatteryChargeEstimate(float percent, uint32_t elapsedMs) {
 }
 
 void updateBatteryMeasurement() {
-    uint32_t adcMillivoltSum = 0;
-    for (uint8_t i = 0; i < BATTERY_SAMPLE_COUNT; ++i) {
-        adcMillivoltSum += analogReadMilliVolts(BATTERY_ADC_PIN);
+    // Spread the 32 ADC conversions across ~640 ms. A former burst loop did
+    // all conversions at once every five seconds and briefly stalled the
+    // pressure stream, which looked like a periodic gauge/UI freeze.
+    static uint32_t adcMillivoltSum = 0;
+    static uint8_t adcSampleCount = 0;
+    static uint32_t nextBatchMs = 0;
+    static uint32_t nextSampleMs = 0;
+    const uint32_t nowMs = millis();
+
+    if (adcSampleCount == 0) {
+        if (nextBatchMs != 0 && (int32_t)(nowMs - nextBatchMs) < 0) return;
+        adcMillivoltSum = 0;
+        nextSampleMs = nowMs;
     }
+    if ((int32_t)(nowMs - nextSampleMs) < 0) return;
+
+    adcMillivoltSum += analogReadMilliVolts(BATTERY_ADC_PIN);
+    ++adcSampleCount;
+    nextSampleMs = nowMs + BATTERY_SAMPLE_SPACING_MS;
+    if (adcSampleCount < BATTERY_SAMPLE_COUNT) return;
+
     const float measuredBatteryMv =
         ((float)adcMillivoltSum / BATTERY_SAMPLE_COUNT) *
         BATTERY_DIVIDER_RATIO;
+    adcSampleCount = 0;
+    nextBatchMs = nowMs + BATTERY_UPDATE_MS;
 
     static float filteredBatteryMv = 0.0f;
     static float estimatedBatteryPercent = -1.0f;
@@ -204,7 +227,6 @@ void updateBatteryMeasurement() {
     static bool charging = false;
     static uint16_t chargingPeakMv = 0;
     static uint8_t fullUnplugConfirmSamples = 0;
-    const uint32_t nowMs = millis();
     const uint16_t measuredMv = (uint16_t)constrain(
         lroundf(measuredBatteryMv), 0L, 5000L);
     const bool fastVoltageDrop =
@@ -466,6 +488,14 @@ bool readTouchPoint(int16_t &x, int16_t &y, bool &pressed) {
     return true;
 }
 
+bool initializeTouchBus(bool restartBus) {
+    if (restartBus) Wire.end();
+    if (!Wire.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN, 400000)) return false;
+    Wire.setTimeOut(10);
+    Wire.beginTransmission(TOUCH_I2C_ADDRESS);
+    return Wire.endTransmission() == 0;
+}
+
 void updateTouchGesture() {
     static bool tracking = false;
     static bool holdHandled = false;
@@ -473,16 +503,36 @@ void updateTouchGesture() {
     static int16_t lastX = 0, lastY = 0;
     static uint32_t startedMs = 0;
     static uint32_t lastPollMs = 0;
+    static uint32_t retryAfterMs = 0;
+    static uint8_t consecutiveFailures = 0;
     const uint32_t nowMs = millis();
-    if (nowMs - lastPollMs < 12) return;
+
+    if (!touchAvailable) {
+        if ((int32_t)(nowMs - retryAfterMs) < 0) return;
+        touchAvailable = initializeTouchBus(true);
+        retryAfterMs = nowMs + TOUCH_RETRY_INTERVAL_MS;
+        if (!touchAvailable) return;
+        consecutiveFailures = 0;
+        Serial.println("[TOUCH] I2C recovered");
+    }
+
+    if (nowMs - lastPollMs < TOUCH_POLL_INTERVAL_MS) return;
     lastPollMs = nowMs;
 
     int16_t x = 0, y = 0;
     bool pressed = false;
     if (!readTouchPoint(x, y, pressed)) {
         tracking = false;
+        if (++consecutiveFailures >= TOUCH_FAILURE_LIMIT) {
+            consecutiveFailures = 0;
+            touchAvailable = false;
+            retryAfterMs = nowMs + TOUCH_RETRY_INTERVAL_MS;
+            Wire.end();
+            Serial.println("[TOUCH] I2C paused after repeated errors");
+        }
         return;
     }
+    consecutiveFailures = 0;
     if (pressed) {
         if (!tracking) {
             tracking = true;
@@ -702,7 +752,6 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
         rangeActive = true;
         outOfRangeSinceMs = 0;
         nextBeatMs = nowMs;
-        fakePulseMode = true;
     } else if (rawPressureInRange) {
         outOfRangeSinceMs = 0;
     } else {
@@ -724,6 +773,16 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
         }
     }
 
+    // Keep the 300 ms debounce only for the beat timeline. Ripple and UI LED
+    // visibility follow the strict pressure bounds immediately, so a pulse
+    // cannot remain visible at/below DIA or above SYS while the cadence state
+    // waits to see whether this was merely boundary noise.
+    fakePulseMode = rawPressureInRange;
+    if (!rawPressureInRange) {
+        displayedBeatAtUs = 0;
+        fakePressureOffset = 0.0f;
+    }
+
     const uint16_t bpm = constrain((uint16_t)fakeBpm,
                                    (uint16_t)30, (uint16_t)240);
     const uint32_t periodMs = 60000UL / bpm;
@@ -734,7 +793,8 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
         if ((int32_t)(nowMs - nextBeatMs) >= 0) nextBeatMs = nowMs + periodMs;
         int64_t executeAtUs = 0;
         uint32_t eventId = 0;
-        if (displayCount < DISPLAY_PULSE_QUEUE_SIZE &&
+        if (rawPressureInRange &&
+            displayCount < DISPLAY_PULSE_QUEUE_SIZE &&
             sendPulseTrigger(PULSE_LARGE, 0, &executeAtUs, &eventId)) {
             const uint8_t tail = (displayHead + displayCount) %
                                  DISPLAY_PULSE_QUEUE_SIZE;
@@ -751,21 +811,27 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
     BleLedAck bleAck{};
     while (bleTakeLedAck(bleAck)) {}
 
-    fakePulseMode = true;
     while (displayCount > 0 &&
            nowUs >= scheduledDisplayUs[displayHead]) {
-        displayedBeatAtUs = scheduledDisplayUs[displayHead];
+        const int64_t dueDisplayUs = scheduledDisplayUs[displayHead];
         displayHead = (displayHead + 1) % DISPLAY_PULSE_QUEUE_SIZE;
         --displayCount;
-        visiblePulseCount = visiblePulseCount + 1;
-        if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
+        if (rawPressureInRange) {
+            displayedBeatAtUs = dueDisplayUs;
+            visiblePulseCount = visiblePulseCount + 1;
+            if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
+        } else {
+            // Consume an already scheduled visual event while hidden. It must
+            // not reappear as a partial ripple when pressure re-enters range.
+            displayedBeatAtUs = 0;
+        }
     }
 
-    // A short cuff-like oscillation rather than a broad waveform occupying
-    // most of the heartbeat period.
+    // Every beat uses the same fixed 1.0 mmHg peak. Duration scales with the
+    // configured BPM so high rates cannot overlap into a continuous wobble.
     const uint32_t pulseDurationMs = min<uint32_t>(520, periodMs * 65 / 100);
     const int64_t ageUs = nowUs - displayedBeatAtUs;
-    if (displayedBeatAtUs != 0 && ageUs >= 0 &&
+    if (rawPressureInRange && displayedBeatAtUs != 0 && ageUs >= 0 &&
         ageUs < (int64_t)pulseDurationMs * 1000) {
         const float phase = (float)ageUs /
                             ((float)pulseDurationMs * 1000.0f);
@@ -877,8 +943,10 @@ void updateUi() {
         const float difference = basePressure - filteredUiBasePressure;
         // Strong filtering for ADC jitter, faster tracking while the cuff is
         // actively inflated/deflated. The synthetic pulse is added afterwards
-        // so its timestamp and 0.6 mmHg amplitude are not delayed or attenuated.
-        const float alpha = fabsf(difference) > 3.0f ? 0.45f : 0.12f;
+        // so its timestamp and fixed 1.0 mmHg amplitude are not attenuated.
+        // These faster coefficients remove the former "low FPS" feeling while
+        // retaining enough filtering to stop single-sample needle chatter.
+        const float alpha = fabsf(difference) > 3.0f ? 0.65f : 0.20f;
         filteredUiBasePressure += difference * alpha;
         if (fabsf(basePressure - filteredUiBasePressure) < 0.04f) {
             filteredUiBasePressure = basePressure;
@@ -1065,7 +1133,6 @@ void sensorTask(void *) {
     const TickType_t samplePeriodTicks = pdMS_TO_TICKS(2);
     uint32_t rateWindowStarted = millis();
     uint16_t sampleCount = 0;
-    uint32_t lastBatteryUpdateMs = 0;
 
     for (;;) {
         const TickType_t sensorNowTick = xTaskGetTickCount();
@@ -1087,10 +1154,9 @@ void sensorTask(void *) {
         ++sampleCount;
 
         const uint32_t now = millis();
-        if (now - lastBatteryUpdateMs >= BATTERY_UPDATE_MS) {
-            lastBatteryUpdateMs = now;
-            updateBatteryMeasurement();
-        }
+        // Non-blocking: normally returns immediately and takes at most one
+        // battery ADC sample on a scheduled pass.
+        updateBatteryMeasurement();
         if (now - rateWindowStarted >= 1000) {
             measuredSps = (uint32_t)sampleCount * 1000 /
                           (now - rateWindowStarted);
@@ -1180,10 +1246,7 @@ void setup() {
     analogSetPinAttenuation(PRESSURE_ADC_PIN, ADC_11db);
     analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db);
     if (!beginUi()) Serial.println("[UI] display initialization failed");
-    Wire.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN, 400000);
-    Wire.setTimeOut(10);
-    Wire.beginTransmission(TOUCH_I2C_ADDRESS);
-    touchAvailable = Wire.endTransmission() == 0;
+    touchAvailable = initializeTouchBus(false);
     Serial.printf("[TOUCH] I2C 0x%02X on GPIO%u/%u: %s\n",
                   TOUCH_I2C_ADDRESS, TOUCH_SDA_PIN, TOUCH_SCL_PIN,
                   touchAvailable ? "ready" : "not found");

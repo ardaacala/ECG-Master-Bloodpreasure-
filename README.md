@@ -101,9 +101,10 @@ olarak görünen slave portlarına master firmware'i yüklemeyin. Port görünm�
 
 ## Batarya ölçümü
 
-GPIO4, kart üzerindeki BAT_ADC direnç bölücüsünü okur. Her 5 saniyede 32 örnek
-ortalaması alınır, ×3 bölücü katsayısı uygulanır ve düşük geçiren filtre
-kullanılır. Yüzde doğrusal `map()` ile değil, 3.20–4.20 V Li-Po eğrisi üzerinde
+GPIO4, kart üzerindeki BAT_ADC direnç bölücüsünü okur. Her ölçüm grubu için 32
+örnek 20 ms aralıklarla alınır; böylece basınç sensörü tek seferde bloke edilmez.
+×3 bölücü katsayısı ve düşük geçiren filtre uygulanır. Yüzde doğrusal `map()`
+ile değil, 3.20–4.20 V Li-Po eğrisi üzerinde
 lookup table + interpolasyonla hesaplanır. USB/şarj sırasında değer doğal olarak
 şarj devresinden etkilenebilir.
 
