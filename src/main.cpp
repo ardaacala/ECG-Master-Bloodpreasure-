@@ -953,10 +953,21 @@ void updateUi() {
         }
     }
     displayedGaugeBasePressure = filteredUiBasePressure;
-    // The sensor task owns one debounced range state for triggers, the dial
-    // pulse and the UI LED. Using separate raw/filtered boundary checks here
-    // made the UI flicker and changed the apparent BPM near either boundary.
-    const bool fakeVisible = fakePulseMode;
+    // Final fail-closed UI gate. The sensor task already hides pulses outside
+    // the strict range, but its raw pressure can cross DIA before the filtered
+    // on-screen base needle does (or vice versa). Require both values to be in
+    // range so no synthetic ripple or UI LED can ever appear while the dial is
+    // visibly below DIA or above SYS.
+    const float strictPressure = (float)targetPressure;
+    const float lowerLimit = (float)fakeMinPressureMmHg;
+    const float upperLimit = (float)fakeMaxPressureMmHg;
+    const bool strictPressureInRange =
+        strictPressure > lowerLimit && strictPressure <= upperLimit;
+    const bool displayedBaseInRange =
+        filteredUiBasePressure > lowerLimit &&
+        filteredUiBasePressure <= upperLimit;
+    const bool fakeVisible = fakePulseMode && strictPressureInRange &&
+                             displayedBaseInRange;
     const float pressure = constrain(filteredUiBasePressure +
                                      (fakeVisible
                                           ? (float)fakePressureOffset

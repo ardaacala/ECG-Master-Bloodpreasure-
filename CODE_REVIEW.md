@@ -10,6 +10,8 @@ Her değişiklikten sonra aşağıdakileri kontrol edin:
 - Gerçek cuff nabız algılayıcısı yanlışlıkla tekrar etkinleştirildi mi?
 - Sentetik nabız yalnızca ayarlanan alt/üst basınç aralığında mı?
 - Sınır debounce'u aktifken bile aralık dışında ripple ve UI LED tamamen gizli mi?
+- Ham basınç ile filtrelenmiş UI baz basıncı sınırın farklı taraflarındayken
+  fail-closed görünürlük kapısı ripple'ı engelliyor mu?
 - Ripple tepesi her beat'te sabit 1.5 mmHg ve süresi BPM periyoduyla sınırlı mı?
 - BAT_ADC örnekleri burst yerine zamana yayılmış mı?
 - Dokunmatik I²C arızasında sıkı retry/log döngüsü yerine backoff çalışıyor mu?

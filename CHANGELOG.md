@@ -17,6 +17,8 @@
   sensör/ibre duraklamasını kaldırır ve ibre takip filtresinin gecikmesini azaltır.
 - Dokunmatik I²C hatalarında sürekli yeniden deneyip log/CPU flood oluşturmak
   yerine üç hatadan sonra 2 saniyelik backoff ve kontrollü bus recovery uygular.
+- UI ripple/LED görünürlüğünü hem anlık sensör basıncı hem filtrelenmiş ekrandaki
+  baz basınç için ayrı ayrı strict `DIA < P <= SYS` kontrolüyle fail-closed yapar.
 
 ## 2.0.0 - 2026-09-08
 
