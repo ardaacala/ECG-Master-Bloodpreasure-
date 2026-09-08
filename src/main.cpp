@@ -20,6 +20,17 @@ constexpr uint8_t PRESSURE_ADC_PIN = 2;
 constexpr float BATTERY_DIVIDER_RATIO = 3.0f;
 constexpr uint32_t BATTERY_UPDATE_MS = 5000;
 constexpr uint8_t BATTERY_SAMPLE_COUNT = 32;
+// ETA6098 charge voltage can raise BAT_ADC much faster than the cell's real
+// state of charge. The charger status pin is not routed to the ESP32, so SOC
+// increases are limited to a physically plausible 0-100% charge time instead
+// of trusting an immediate voltage jump. A falling step is applied quickly so
+// unplugging USB returns to the battery-only estimate without a long tail.
+constexpr uint32_t BATTERY_MIN_FULL_CHARGE_MS = 90UL * 60UL * 1000UL;
+constexpr uint16_t BATTERY_FAST_DROP_MV = 70;
+constexpr float BATTERY_VOLTAGE_RISE_ALPHA = 0.08f;
+constexpr float BATTERY_VOLTAGE_FALL_ALPHA = 0.35f;
+constexpr float BATTERY_SOC_FALL_ALPHA = 0.45f;
+constexpr float BATTERY_SOC_HYSTERESIS_PERCENT = 1.0f;
 constexpr uint16_t ADC_RESOLUTION_MAX = 4095;
 constexpr uint16_t SENSOR_NOMINAL_ZERO_MV = 200;
 constexpr uint16_t SENSOR_ZERO_MIN_VALID_MV = 100;
@@ -110,6 +121,7 @@ volatile uint16_t maxUiDrawMs = 0;
 volatile uint16_t batteryVoltageMv = 0;
 volatile uint8_t batteryPercent = 0;
 volatile bool batteryReadingValid = false;
+volatile bool batteryRiseLimited = false;
 volatile bool darkTheme = false;
 volatile uint32_t themeRevision = 0;
 volatile bool requestedScreenOn = true;
@@ -152,18 +164,73 @@ void updateBatteryMeasurement() {
     const float measuredBatteryMv =
         ((float)adcMillivoltSum / BATTERY_SAMPLE_COUNT) *
         BATTERY_DIVIDER_RATIO;
+
     static float filteredBatteryMv = 0.0f;
-    filteredBatteryMv = filteredBatteryMv == 0.0f
-                            ? measuredBatteryMv
-                            : filteredBatteryMv * 0.80f +
-                                  measuredBatteryMv * 0.20f;
+    static float estimatedBatteryPercent = -1.0f;
+    static uint16_t previousMeasuredBatteryMv = 0;
+    static uint32_t previousUpdateMs = 0;
+    const uint32_t nowMs = millis();
+    const uint16_t measuredMv = (uint16_t)constrain(
+        lroundf(measuredBatteryMv), 0L, 5000L);
+    const bool fastVoltageDrop =
+        previousMeasuredBatteryMv >= 2500 &&
+        previousMeasuredBatteryMv > measuredMv &&
+        previousMeasuredBatteryMv - measuredMv >= BATTERY_FAST_DROP_MV;
+
+    if (filteredBatteryMv == 0.0f) {
+        filteredBatteryMv = measuredBatteryMv;
+    } else {
+        const float alpha = fastVoltageDrop
+                                ? 1.0f
+                                : (measuredBatteryMv < filteredBatteryMv
+                                       ? BATTERY_VOLTAGE_FALL_ALPHA
+                                       : BATTERY_VOLTAGE_RISE_ALPHA);
+        filteredBatteryMv += alpha * (measuredBatteryMv - filteredBatteryMv);
+    }
     const uint16_t publishedMv = (uint16_t)constrain(
         lroundf(filteredBatteryMv), 0L, 5000L);
+    const float voltagePercent =
+        (float)batteryPercentFromMillivolts(publishedMv);
+
+    if (estimatedBatteryPercent < 0.0f) {
+        estimatedBatteryPercent = voltagePercent;
+        batteryRiseLimited = false;
+    } else if (fastVoltageDrop) {
+        // USB removal normally causes a clear downward terminal-voltage step.
+        // Snap to the battery-only voltage estimate before applying any rise
+        // limiter; it may still be above an intentionally conservative SOC.
+        estimatedBatteryPercent = voltagePercent;
+        batteryRiseLimited = false;
+    } else if (voltagePercent > estimatedBatteryPercent) {
+        const uint32_t elapsedMs = previousUpdateMs == 0
+                                       ? BATTERY_UPDATE_MS
+                                       : nowMs - previousUpdateMs;
+        const float maximumRise =
+            100.0f * (float)elapsedMs /
+            (float)BATTERY_MIN_FULL_CHARGE_MS;
+        const float nextEstimate = min(voltagePercent,
+                                       estimatedBatteryPercent + maximumRise);
+        batteryRiseLimited =
+            voltagePercent - nextEstimate >= 0.5f;
+        estimatedBatteryPercent = nextEstimate;
+    } else if (voltagePercent + BATTERY_SOC_HYSTERESIS_PERCENT <
+               estimatedBatteryPercent) {
+        estimatedBatteryPercent +=
+            BATTERY_SOC_FALL_ALPHA *
+            (voltagePercent - estimatedBatteryPercent);
+        batteryRiseLimited = false;
+    } else {
+        batteryRiseLimited = false;
+    }
+
     batteryVoltageMv = publishedMv;
-    batteryPercent = batteryPercentFromMillivolts(publishedMv);
+    batteryPercent = (uint8_t)constrain(
+        lroundf(estimatedBatteryPercent), 0L, 100L);
     // A disconnected divider is near zero. USB/charging may make the voltage
     // rise; percentage remains clamped by the lookup-table endpoints.
     batteryReadingValid = publishedMv >= 2500;
+    previousMeasuredBatteryMv = measuredMv;
+    previousUpdateMs = nowMs;
 }
 
 bool sendPulseTrigger(PulseType pulseType = PULSE_LARGE,
@@ -1071,14 +1138,15 @@ void loop() {
         const uint32_t uiAgeMs = now - lastUiFrameMs;
         const uint16_t uiMaxMs = maxUiDrawMs;
         maxUiDrawMs = 0;
-        Serial.printf("[SENSOR] adc=%ld delta=%ld mV=%lu zero_mV=%lu mmHg=%.2f sat=%u sps=%u ui_fps=%u ui_age=%lu ui_max=%u bpm=%u bat=%umV/%u%%\n",
+        Serial.printf("[SENSOR] adc=%ld delta=%ld mV=%lu zero_mV=%lu mmHg=%.2f sat=%u sps=%u ui_fps=%u ui_age=%lu ui_max=%u bpm=%u bat=%umV/%u%% rise_limited=%u\n",
                       (long)raw, (long)(raw - zeroRaw),
                       (unsigned long)milliVolts,
                       (unsigned long)zeroMilliVolts, pressure,
                       adcSaturated ? 1U : 0U, measuredSps, measuredUiFps,
                       (unsigned long)uiAgeMs, (unsigned)uiMaxMs,
                       (unsigned)fakeBpm, (unsigned)batteryVoltageMv,
-                      (unsigned)batteryPercent);
+                      (unsigned)batteryPercent,
+                      batteryRiseLimited ? 1U : 0U);
     }
     delay(20);
 }

@@ -15,6 +15,7 @@ Her değişiklikten sonra aşağıdakileri kontrol edin:
 - Dokunmatik/QMI8658 ortak GPIO47/48 hattı değiştirilmiş mi?
 - UI task içine flash, ağ, uzun seri çıktı veya busy-loop eklendi mi?
 - Gerçek parola içeren hiçbir `secrets.h` Git'e eklenmiş mi?
+- Şarj voltajı sıçraması SOC'yi anında yükseltiyor mu; USB çıkışı hızlı düşüyor mu?
 
 Donanım yüklemesinde ESP32-S3 master portunu VID:PID `303A:1001` ile doğrulayın;
 CP210x slave portlarına master firmware'i yüklemeyin.

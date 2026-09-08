@@ -107,6 +107,19 @@ kullanılır. Yüzde doğrusal `map()` ile değil, 3.20–4.20 V Li-Po eğrisi �
 lookup table + interpolasyonla hesaplanır. USB/şarj sırasında değer doğal olarak
 şarj devresinden etkilenebilir.
 
+### Feature: Battery level while charging fix
+
+`feature/battery-level-while-charging-fix` dalında BAT_ADC voltajındaki ani
+yukarı sıçrama doğrudan yüzde artışı kabul edilmez. Artış, 1500 mAh hücre ve
+kartın şarj devresi için fiziksel olarak makul en hızlı 90 dakikalık 0–100%
+zamanına sınırlandırılır. USB çıkarıldığında 70 mV veya daha büyük düşüş hızlı
+uygulanır; gösterge eski filtredeki gibi dakikalarca yüksek kalmaz.
+
+Kartın ETA6098 `STAT` çıkışı ESP32 GPIO'suna bağlı olmadığı için yazılım yalnızca
+BAT_ADC ile şarj kablosunu kesin olarak algılayamaz. Sistem USB zaten takılıyken
+soğuk açılırsa geçmiş bir batarya-only referansı yoktur; bu donanım sınırlaması
+ayrı bir VBUS/STAT bağlantısı olmadan tamamen çözülemez.
+
 ## Proje yapısı
 
 - `src/main.cpp`: ADC, sahte nabız, UI, dokunmatik ve görev dağılımı.
