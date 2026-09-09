@@ -11,6 +11,7 @@
 #include "protocol.h"
 #include "wifi_master.h"
 #include "ble_master.h"
+#include "ble_ota_service.h"
 #include "ota_service.h"
 
 // The active 466x466 round Waveshare board routes its onboard BAT_ADC divider
@@ -408,8 +409,11 @@ void updateBatteryMeasurement() {
 bool sendPulseTrigger(PulseType pulseType = PULSE_LARGE,
                       uint64_t targetMask = 0,
                       int64_t *executeAtResultUs = nullptr,
-                      uint32_t *eventIdResult = nullptr) {
-    if (standbyEntering || otaServiceInProgress()) return false;
+                      uint32_t *eventIdResult = nullptr,
+                      bool reportToPhone = false) {
+    if (standbyEntering || otaServiceInProgress() || bleOtaInProgress()) {
+        return false;
+    }
     const int64_t executeAtUs = esp_timer_get_time() +
                                 FIXED_TRIGGER_LEAD_US;
     uint32_t eventId = 0;
@@ -430,18 +434,48 @@ bool sendPulseTrigger(PulseType pulseType = PULSE_LARGE,
 
     if (executeAtResultUs) *executeAtResultUs = executeAtUs;
     if (eventIdResult) *eventIdResult = eventId;
-    const uint32_t durationUs = pulseType == PULSE_SMALL
-                                    ? SMALL_PULSE_DURATION_US
-                                    : LARGE_PULSE_DURATION_US;
-    const TriggerPacket packet{MSG_TRIGGER, eventId, pulseType,
-                               targetMask, executeAtUs, durationUs};
-    const bool wifiQueued = wifiSendTrigger(packet);
-    const bool bleQueued = bleSendTrigger(packet);
-    Serial.printf("[PULSE TRIGGER] #%lu wifi=%u ble=%u at=%lld\n",
-                  (unsigned long)eventId, wifiQueued ? 1U : 0U,
-                  bleQueued ? 1U : 0U, (long long)executeAtUs);
-    blePublishPhoneResult(packet.eventId, wifiQueued, bleQueued);
+    // V3 physical outputs are generated locally by each slave from the
+    // retained TriggerStatePacket. This function now schedules only the
+    // master's synchronized UI pulse and never floods transports per beat.
+    if (ENABLE_VERBOSE_TIMING_LOGS) {
+        Serial.printf("[LOCAL PULSE] #%lu at=%lld target=0x%llx type=%u\n",
+                      (unsigned long)eventId, (long long)executeAtUs,
+                      (unsigned long long)targetMask, (unsigned)pulseType);
+    }
+    if (reportToPhone) blePublishPhoneResult(eventId, false, false);
     return true;
+}
+
+void updateTriggerState(float pressureMmHg, bool saturated) {
+    static bool initialized = false;
+    static uint16_t publishedBpm = 0;
+    static PressureZone publishedZone = PRESSURE_BELOW;
+    static uint32_t revision = 0;
+
+    const uint16_t bpm = constrain((uint16_t)fakeBpm,
+                                   (uint16_t)30, (uint16_t)240);
+    PressureZone zone = PRESSURE_INSIDE;
+    if (saturated || pressureMmHg >= (float)fakeMaxPressureMmHg) {
+        zone = PRESSURE_ABOVE;
+    } else if (pressureMmHg <= (float)fakeMinPressureMmHg) {
+        zone = PRESSURE_BELOW;
+    }
+    if (initialized && bpm == publishedBpm && zone == publishedZone) return;
+
+    initialized = true;
+    publishedBpm = bpm;
+    publishedZone = zone;
+    ++revision;
+    const int64_t effectiveAtUs = esp_timer_get_time() + FIXED_TRIGGER_LEAD_US;
+    TriggerStatePacket packet{MSG_TRIGGER_STATE, 3, WIFI_NODE_ID, revision,
+                              bpm, (uint8_t)zone, 0, effectiveAtUs};
+    const bool wifiQueued = wifiPublishTriggerState(packet);
+    packet.receiverDeviceId = BLE_NODE_ID;
+    const bool bleQueued = blePublishTriggerState(packet);
+    Serial.printf("[STATE] rev=%lu bpm=%u zone=%u wifi=%u ble=%u at=%lld\n",
+                  (unsigned long)revision, (unsigned)bpm, (unsigned)zone,
+                  wifiQueued ? 1U : 0U, bleQueued ? 1U : 0U,
+                  (long long)effectiveAtUs);
 }
 
 constexpr int16_t GAUGE_CX = SCREEN_W / 2;
@@ -1068,7 +1102,7 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
         displayedBeatAtUs = 0;
     };
 
-    if (otaServiceInProgress()) {
+    if (otaServiceInProgress() || bleOtaInProgress()) {
         rangeActive = false;
         nextBeatMs = 0;
         outOfRangeSinceMs = 0;
@@ -1341,6 +1375,7 @@ void processSample(int32_t raw, uint32_t milliVolts) {
     // The fixed synthetic ripple is still added afterwards in updateUi().
     targetPressure = max(0.0f, cleanPressure);
     const uint32_t nowMs = millis();
+    updateTriggerState(targetPressure, adcSaturated);
     updateFakePulse(targetPressure, adcSaturated, nowMs);
 }
 
@@ -1737,7 +1772,7 @@ void setup() {
 }
 
 void loop() {
-    otaServiceHandle();
+    if (!bleOtaInProgress()) otaServiceHandle();
     updateMotionActivity();
     updateTouchGesture();
     BlePhoneCommand phoneCommand{};
@@ -1764,12 +1799,12 @@ void loop() {
                           (unsigned)fakeMaxPressureMmHg);
         } else {
             sendPulseTrigger(phoneCommand.pulseType,
-                             phoneCommand.targetMask);
+                             phoneCommand.targetMask, nullptr, nullptr, true);
         }
     }
     const uint32_t now = millis();
     if (imuMotionWakeAvailable && !standbyEntering &&
-        !otaServiceInProgress() &&
+        !otaServiceInProgress() && !bleOtaInProgress() &&
         now - lastMotionActivityMs >= STANDBY_TIMEOUT_MS) {
         enterMotionStandby();
     }

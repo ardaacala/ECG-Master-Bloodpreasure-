@@ -21,6 +21,9 @@
 #ifndef OTA_PASSWORD
 #define OTA_PASSWORD WIFI_AP_PASSWORD
 #endif
+#ifndef BLE_OTA_PASSWORD
+#define BLE_OTA_PASSWORD OTA_PASSWORD
+#endif
 
 // Karma sistem: bir slave Wi-Fi, GPIO4 active-low slave BLE'dir.
 #define WIFI_NODE_ID 1

@@ -26,6 +26,7 @@ void bleMasterBegin();
 void bleMasterTick();
 BleNodeStatus bleNodeStatus();
 bool bleSendTrigger(const TriggerPacket &packet);
+bool blePublishTriggerState(const TriggerStatePacket &packet);
 bool bleTakeLedAck(BleLedAck &ack);
 bool bleTakePhoneCommand(BlePhoneCommand &command);
 void blePublishBpm(uint16_t bpm, uint16_t systolicMmHg,

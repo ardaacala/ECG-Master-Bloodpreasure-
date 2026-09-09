@@ -1,7 +1,7 @@
 # Repository instructions for coding agents
 
 This is hardware firmware, not a generic ESP32 sample. Preserve the verified
-Version 2 behavior unless the user explicitly requests a hardware migration.
+Version 3 behavior unless the user explicitly requests a hardware migration.
 
 ## Required workflow
 
@@ -33,11 +33,16 @@ Version 2 behavior unless the user explicitly requests a hardware migration.
 - Do not add flash/NVS writes, network calls, scanning, or long serial output to
   the UI task.
 - Do not add busy loops. FreeRTOS tasks must block/yield.
-- `sendPulseTrigger()` is the single global de-duplication point.
-- Physical slaves and UI must use the same scheduled execution timestamp.
+- `sendPulseTrigger()` schedules local UI pulses only; it must not send a packet
+  on every beat.
+- V3 physical slaves retain the latest trigger state and generate BPM locally.
+  Their first beat and the UI use the same scheduled execution timestamp.
+- Send `TriggerStatePacket` only when BPM/zone/delay changes or once after
+  reconnect. Retry at most three times at 500 ms until a matching revision ACK.
+- Periodic time synchronization remains separate from trigger-state delivery.
 - Synthetic pulse generation is the only automatic beat source. Do not re-enable
   the disabled real cuff-pulse detector unless explicitly requested.
-- Preserve 30–240 BPM, 200 ms duplicate guard, 600 ms fixed trigger lead, and
+- Preserve 30–240 BPM, 200 ms local duplicate guard, 600 ms fixed trigger lead, and
   pressure-range behavior unless a requested change specifically targets them.
 
 ## BLE contract
@@ -47,7 +52,14 @@ Version 2 behavior unless the user explicitly requests a hardware migration.
 - A BPM-only integer keeps the current pressure range.
 - UUIDs and packed transport structs in `include/protocol.h` are shared contracts;
   changing them requires matching slave/app changes.
+- V3 state routing uses receiver ID 0 for broadcast, 1 for the Wi-Fi slave and
+  2 for the BLE slave. Slaves ACK the exact revision and must not rewrite flash
+  for an unchanged semantic state.
 - When changing a transport packet, update and build its matching slave project.
+- PC BLE OTA uses the dedicated `BLE_OTA_*` UUIDs and packed structs in
+  `include/protocol.h`; keep `tools/ble_ota_upload.py` in sync with them.
+- BLE OTA accepts only the environment's `firmware.bin`, never the combined
+  `firmware.factory.bin`. Preserve offset ACK, CRC32 and ESP image validation.
 
 ## Repository hygiene
 

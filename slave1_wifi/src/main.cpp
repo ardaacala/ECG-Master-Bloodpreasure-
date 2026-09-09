@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_timer.h>
+#include <Preferences.h>
 #include <cstring>
 
 #include "config.h"
@@ -38,6 +39,15 @@ static size_t rxLength = 0;
 static uint32_t lastStatusMs = 0;
 static uint32_t lateDrops = 0;
 static uint32_t queueRejects = 0;
+static Preferences stateStorage;
+static bool retainedStateValid = false;
+static bool retainedStatePersisted = false;
+static uint16_t retainedBpm = 72;
+static PressureZone retainedZone = PRESSURE_BELOW;
+static uint16_t retainedDelayMs = 0;
+static int64_t nextStateBeatLocalUs = 0;
+static constexpr uint8_t TRIGGER_STATE_PROTOCOL_VERSION = 3;
+static constexpr int64_t STATE_PULSE_DURATION_US = 100000;
 
 static constexpr uint8_t LED_INACTIVE_LEVEL =
     LED_ACTIVE_LEVEL == HIGH ? LOW : HIGH;
@@ -45,10 +55,7 @@ static constexpr uint8_t LED_INACTIVE_LEVEL =
 static void clearRuntimeState() {
     clockSynchronized = false;
     eventCount = 0;
-    ledIsOn = false;
-    ledOffAtUs = 0;
     rxLength = 0;
-    digitalWrite(LED_PIN, LED_INACTIVE_LEVEL);
 }
 
 static bool sendBytes(const void *data, size_t length) {
@@ -60,7 +67,87 @@ static size_t incomingPacketSize(uint8_t type) {
     if (type == MSG_SYNC_REQ) return sizeof(SyncRequest);
     if (type == MSG_SYNC_COMMIT) return sizeof(SyncCommit);
     if (type == MSG_TRIGGER) return sizeof(TriggerPacket);
+    if (type == MSG_TRIGGER_STATE) return sizeof(TriggerStatePacket);
     return 0;
+}
+
+static bool persistRetainedState() {
+    if (!stateStorage.begin("trigger-v3", false)) return false;
+    const bool ok = stateStorage.putUShort("bpm", retainedBpm) == sizeof(uint16_t) &&
+                    stateStorage.putUChar("zone", (uint8_t)retainedZone) == sizeof(uint8_t) &&
+                    stateStorage.putUShort("delay", retainedDelayMs) == sizeof(uint16_t) &&
+                    stateStorage.putBool("valid", true) == sizeof(bool);
+    stateStorage.end();
+    return ok;
+}
+
+static void scheduleRetainedState(const TriggerStatePacket *packet = nullptr) {
+    if (!retainedStateValid || retainedZone != PRESSURE_INSIDE) {
+        nextStateBeatLocalUs = 0;
+        ledIsOn = false;
+        ledOffAtUs = 0;
+        return;
+    }
+    const int64_t nowUs = esp_timer_get_time();
+    const int64_t periodUs = 60000000LL / retainedBpm;
+    int64_t firstUs = packet && clockSynchronized
+        ? packet->effectiveAtMasterUs + clockOffsetUs +
+              (int64_t)retainedDelayMs * 1000
+        : nowUs + (int64_t)retainedDelayMs * 1000;
+    if (firstUs <= nowUs) {
+        firstUs += ((nowUs - firstUs) / periodUs + 1) * periodUs;
+    }
+    nextStateBeatLocalUs = firstUs;
+}
+
+static void loadRetainedState() {
+    if (!stateStorage.begin("trigger-v3", true)) return;
+    retainedStateValid = stateStorage.getBool("valid", false);
+    retainedBpm = stateStorage.getUShort("bpm", 72);
+    retainedZone = (PressureZone)stateStorage.getUChar("zone", PRESSURE_BELOW);
+    retainedDelayMs = stateStorage.getUShort("delay", 0);
+    stateStorage.end();
+    if (retainedBpm < 30 || retainedBpm > 240 ||
+        retainedZone > PRESSURE_ABOVE) {
+        retainedStateValid = false;
+    } else if (retainedStateValid) {
+        retainedStatePersisted = true;
+    }
+    scheduleRetainedState();
+}
+
+static void applyTriggerState(const TriggerStatePacket &packet) {
+    TriggerStateApplyResult result = TRIGGER_STATE_INVALID;
+    if (packet.protocolVersion == TRIGGER_STATE_PROTOCOL_VERSION &&
+        (packet.receiverDeviceId == 0 || packet.receiverDeviceId == DEVICE_ID) &&
+        packet.bpm >= 30 && packet.bpm <= 240 &&
+        packet.pressureZone <= PRESSURE_ABOVE &&
+        packet.actionDelayMs <= 60000) {
+        const bool changed = !retainedStateValid || !retainedStatePersisted ||
+            retainedBpm != packet.bpm ||
+            retainedZone != (PressureZone)packet.pressureZone ||
+            retainedDelayMs != packet.actionDelayMs;
+        retainedStateValid = true;
+        retainedBpm = packet.bpm;
+        retainedZone = (PressureZone)packet.pressureZone;
+        retainedDelayMs = packet.actionDelayMs;
+        eventCount = 0;
+        scheduleRetainedState(&packet);
+        if (changed) {
+            retainedStatePersisted = persistRetainedState();
+            result = retainedStatePersisted ? TRIGGER_STATE_APPLIED
+                                            : TRIGGER_STATE_PERSIST_FAILED;
+        } else {
+            result = TRIGGER_STATE_UNCHANGED;
+        }
+    }
+    TriggerStateAck ack{MSG_TRIGGER_STATE_ACK,
+                        TRIGGER_STATE_PROTOCOL_VERSION, DEVICE_ID,
+                        packet.stateRevision, (uint8_t)result};
+    sendBytes(&ack, sizeof(ack));
+    Serial.printf("[STATE] rev=%lu bpm=%u zone=%u delay=%u result=%u\n",
+                  (unsigned long)packet.stateRevision, packet.bpm,
+                  packet.pressureZone, packet.actionDelayMs, result);
 }
 
 static bool queuePulse(const TriggerPacket &packet) {
@@ -123,6 +210,13 @@ static void handlePacket(const uint8_t *data, size_t length, int64_t receivedAtU
         if (!queuePulse(packet)) {
             Serial.printf("[EVENT] #%lu rejected\n", (unsigned long)packet.eventId);
         }
+        return;
+    }
+    if (data[0] == MSG_TRIGGER_STATE &&
+        length == sizeof(TriggerStatePacket)) {
+        TriggerStatePacket packet{};
+        memcpy(&packet, data, sizeof(packet));
+        applyTriggerState(packet);
     }
 }
 
@@ -204,6 +298,17 @@ static void ledTick() {
     int32_t ackLateness[EVENT_QUEUE_SIZE];
     int64_t ackMasterTimes[EVENT_QUEUE_SIZE];
     uint8_t ackCount = 0;
+    if (retainedStateValid && retainedZone == PRESSURE_INSIDE &&
+        nextStateBeatLocalUs > 0 && nowUs >= nextStateBeatLocalUs) {
+        const int64_t periodUs = 60000000LL / retainedBpm;
+        const int64_t periods = (nowUs - nextStateBeatLocalUs) / periodUs + 1;
+        nextStateBeatLocalUs += periods * periodUs;
+        ledIsOn = true;
+        ledOffAtUs = nowUs + STATE_PULSE_DURATION_US;
+    } else if (retainedStateValid && retainedZone != PRESSURE_INSIDE) {
+        ledIsOn = false;
+        ledOffAtUs = 0;
+    }
     while (eventCount > 0 && eventQueue[0].startLocalUs <= nowUs) {
         const PendingPulse event = eventQueue[0];
         for (uint8_t index = 1; index < eventCount; ++index) {
@@ -240,6 +345,7 @@ void setup() {
     }
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LED_INACTIVE_LEVEL);
+    loadRetainedState();
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     Serial.printf("ECG WIFI SLAVE (ID:%u, NAME:%s) start, LED GPIO:%d active:%s\n",

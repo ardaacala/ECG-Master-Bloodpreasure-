@@ -27,6 +27,10 @@ struct ClientRuntime {
     uint32_t lateDrops;
     uint32_t queueRejects;
     uint8_t quality;
+    uint32_t acknowledgedStateRevision;
+    uint32_t pendingStateRevision;
+    uint32_t lastStateSendMs;
+    uint8_t stateSendAttempts;
     uint8_t rxBuffer[sizeof(HelloPacket)];
     size_t rxLength;
 };
@@ -39,6 +43,7 @@ static ClientRuntime clients[MAX_WIFI_CLIENTS] = {};
 static ClientRuntime *deviceMap[UINT8_MAX + 1] = {};
 static uint32_t nextRequestId = 0;
 static QueueHandle_t triggerQueue = nullptr;
+static QueueHandle_t triggerStateQueue = nullptr;
 static QueueHandle_t ackQueue = nullptr;
 static TaskHandle_t networkTaskHandle = nullptr;
 static volatile uint8_t publishedConnected = 0;
@@ -62,6 +67,11 @@ static constexpr uint32_t STATUS_TIMEOUT_MS = 10000;
 static uint32_t totalSent = 0;
 static uint32_t totalAcked = 0;
 static uint32_t totalMissed = 0;
+static TriggerStatePacket latestTriggerState{};
+static bool latestTriggerStateValid = false;
+static constexpr uint8_t TRIGGER_STATE_PROTOCOL_VERSION = 3;
+static constexpr uint8_t TRIGGER_STATE_MAX_ATTEMPTS = 3;
+static constexpr uint32_t TRIGGER_STATE_RETRY_MS = 500;
 
 struct EventAudit {
     uint32_t eventId;
@@ -88,6 +98,7 @@ static size_t incomingPacketSize(uint8_t type) {
     if (type == MSG_LED_ON_ACK) return sizeof(LedOnAck);
     if (type == MSG_HELLO) return sizeof(HelloPacket);
     if (type == MSG_DEVICE_STATUS) return sizeof(DeviceStatusPacket);
+    if (type == MSG_TRIGGER_STATE_ACK) return sizeof(TriggerStateAck);
     return 0;
 }
 
@@ -181,6 +192,26 @@ static void handlePacket(uint8_t index, const uint8_t *data, size_t length) {
         node.lateDrops = status.lateDrops;
         node.queueRejects = status.queueRejects;
         node.lastStatusMs = millis();
+        return;
+    }
+    if (data[0] == MSG_TRIGGER_STATE_ACK &&
+        length == sizeof(TriggerStateAck)) {
+        TriggerStateAck ack{};
+        memcpy(&ack, data, sizeof(ack));
+        if (ack.protocolVersion != TRIGGER_STATE_PROTOCOL_VERSION ||
+            ack.deviceId != node.deviceId ||
+            ack.stateRevision != node.pendingStateRevision) return;
+        if (ack.result == TRIGGER_STATE_APPLIED ||
+            ack.result == TRIGGER_STATE_UNCHANGED) {
+            node.acknowledgedStateRevision = ack.stateRevision;
+            Serial.printf("[STATE] WiFi device %u revision %lu ACK result=%u\n",
+                          node.deviceId, (unsigned long)ack.stateRevision,
+                          ack.result);
+        } else {
+            Serial.printf("[STATE] WiFi device %u revision %lu rejected=%u\n",
+                          node.deviceId, (unsigned long)ack.stateRevision,
+                          ack.result);
+        }
         return;
     }
     if (data[0] != MSG_SYNC_RESP || length != sizeof(SyncResponse)) return;
@@ -287,9 +318,10 @@ void wifiMasterBegin() {
     server.begin();
     server.setNoDelay(true);
     triggerQueue = xQueueCreate(TRIGGER_QUEUE_LENGTH, sizeof(TriggerPacket));
+    triggerStateQueue = xQueueCreate(1, sizeof(TriggerStatePacket));
     ackQueue = xQueueCreate(16, sizeof(WifiLedAck));
-    if (!triggerQueue) {
-        Serial.println("[WIFI] trigger queue could not be created");
+    if (!triggerQueue || !triggerStateQueue) {
+        Serial.println("[WIFI] network queue could not be created");
         return;
     }
     Serial.printf("[WIFI] SSID:%s IP:%s TCP:%u max:%u\n", WIFI_AP_SSID,
@@ -309,6 +341,12 @@ void wifiMasterBegin() {
 void wifiMasterTick() {
     acceptClients();
     const uint32_t nowMs = millis();
+    TriggerStatePacket incomingState{};
+    while (triggerStateQueue &&
+           xQueueReceive(triggerStateQueue, &incomingState, 0) == pdTRUE) {
+        latestTriggerState = incomingState;
+        latestTriggerStateValid = true;
+    }
     uint8_t connected = 0;
     uint8_t synced = 0;
     uint32_t recommendedLeadUs = MIN_LEAD_US;
@@ -362,6 +400,32 @@ void wifiMasterTick() {
             if ((uint32_t)node.jitterUs > worstJitterUs) worstJitterUs = (uint32_t)node.jitterUs;
             if (node.rssiDbm != 0 && (worstRssi == 0 || node.rssiDbm < worstRssi)) {
                 worstRssi = node.rssiDbm;
+            }
+            const bool isReceiver = latestTriggerStateValid &&
+                (latestTriggerState.receiverDeviceId == 0 ||
+                 latestTriggerState.receiverDeviceId == node.deviceId);
+            if (isReceiver && quality < 3 &&
+                node.acknowledgedStateRevision !=
+                    latestTriggerState.stateRevision) {
+                if (node.pendingStateRevision !=
+                    latestTriggerState.stateRevision) {
+                    node.pendingStateRevision =
+                        latestTriggerState.stateRevision;
+                    node.stateSendAttempts = 0;
+                    node.lastStateSendMs = 0;
+                }
+                if (node.stateSendAttempts < TRIGGER_STATE_MAX_ATTEMPTS &&
+                    (node.lastStateSendMs == 0 ||
+                     clientNowMs - node.lastStateSendMs >=
+                         TRIGGER_STATE_RETRY_MS)) {
+                    node.lastStateSendMs = clientNowMs;
+                    ++node.stateSendAttempts;
+                    if (!sendBytes(node, &latestTriggerState,
+                                   sizeof(latestTriggerState))) {
+                        disconnectClient(index);
+                        continue;
+                    }
+                }
             }
         }
     }
@@ -429,6 +493,11 @@ bool wifiSystemReady() {
 
 bool wifiSendTrigger(const TriggerPacket &packet) {
     return triggerQueue && xQueueSend(triggerQueue, &packet, 0) == pdTRUE;
+}
+
+bool wifiPublishTriggerState(const TriggerStatePacket &packet) {
+    return triggerStateQueue &&
+           xQueueOverwrite(triggerStateQueue, &packet) == pdTRUE;
 }
 
 uint32_t wifiRecommendedLeadUs() {
