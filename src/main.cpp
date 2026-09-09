@@ -59,6 +59,10 @@ constexpr float PRESSURE_GAIN_CORRECTION = 1.20f;
 constexpr float GAUGE_MAX_MMHG = 300.0f;
 constexpr uint16_t ADC_SAMPLE_HZ = 500;
 constexpr uint32_t ADC_SAMPLE_PERIOD_US = 1000000UL / ADC_SAMPLE_HZ;
+constexpr uint8_t PRESSURE_MEDIAN_WINDOW = 5;
+constexpr float PRESSURE_SPIKE_STEP_MMHG = 2.5f;
+constexpr float PRESSURE_SPIKE_RETURN_MMHG = 1.0f;
+constexpr uint8_t PRESSURE_SPIKE_CONFIRM_SAMPLES = 8;
 constexpr uint16_t UI_REFRESH_HZ = 30;
 constexpr uint32_t UI_FRAME_PERIOD_US = 1000000UL / UI_REFRESH_HZ;
 constexpr uint16_t PULSE_LED_ON_MS = 150;
@@ -1192,6 +1196,104 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
     }
 }
 
+float medianPressureSample(float sample) {
+    // Fixed-size stack/ring buffers only: at 500 Hz this is at most ten tiny
+    // comparisons per sample and never allocates or touches the UI core.
+    static float samples[PRESSURE_MEDIAN_WINDOW] = {};
+    static uint8_t nextSample = 0;
+    static bool initialized = false;
+    if (!initialized) {
+        for (float &stored : samples) stored = sample;
+        initialized = true;
+    } else {
+        samples[nextSample] = sample;
+        nextSample = (nextSample + 1) % PRESSURE_MEDIAN_WINDOW;
+    }
+
+    float ordered[PRESSURE_MEDIAN_WINDOW];
+    memcpy(ordered, samples, sizeof(ordered));
+    for (uint8_t i = 1; i < PRESSURE_MEDIAN_WINDOW; ++i) {
+        const float value = ordered[i];
+        int8_t j = (int8_t)i - 1;
+        while (j >= 0 && ordered[j] > value) {
+            ordered[j + 1] = ordered[j];
+            --j;
+        }
+        ordered[j + 1] = value;
+    }
+    return ordered[PRESSURE_MEDIAN_WINDOW / 2];
+}
+
+float rejectTransientPressureSpike(float sample) {
+    static bool initialized = false;
+    static bool candidateActive = false;
+    static float acceptedPressure = 0.0f;
+    static float previousSample = 0.0f;
+    static int8_t candidateDirection = 0;
+    static uint8_t candidateSamples = 0;
+
+    if (!initialized) {
+        initialized = true;
+        acceptedPressure = sample;
+        previousSample = sample;
+        return sample;
+    }
+
+    const float adjacentStep = sample - previousSample;
+    previousSample = sample;
+    if (!candidateActive) {
+        if (fabsf(adjacentStep) <= PRESSURE_SPIKE_STEP_MMHG) {
+            acceptedPressure = sample;
+            return acceptedPressure;
+        }
+        candidateActive = true;
+        candidateDirection = adjacentStep > 0.0f ? 1 : -1;
+        candidateSamples = 1;
+        return acceptedPressure;
+    }
+
+    const float distanceFromAccepted = sample - acceptedPressure;
+    if (fabsf(distanceFromAccepted) <= PRESSURE_SPIKE_RETURN_MMHG) {
+        // It returned to the old signal before confirmation: discard the
+        // complete excursion instead of letting even one UI frame see it.
+        candidateActive = false;
+        candidateSamples = 0;
+        acceptedPressure = sample;
+        return acceptedPressure;
+    }
+
+    const bool sameDirection = candidateDirection > 0
+        ? distanceFromAccepted > 0.0f
+        : distanceFromAccepted < 0.0f;
+    if (!sameDirection) {
+        candidateDirection = distanceFromAccepted > 0.0f ? 1 : -1;
+        candidateSamples = 1;
+        return acceptedPressure;
+    }
+
+    const bool remainsBeyondStep = candidateDirection > 0
+        ? distanceFromAccepted >= PRESSURE_SPIKE_STEP_MMHG
+        : distanceFromAccepted <= -PRESSURE_SPIKE_STEP_MMHG;
+    if (!remainsBeyondStep) {
+        // The remaining change is below the artifact threshold. Resume normal
+        // tracking rather than turning a legitimate slow cuff ramp into steps.
+        candidateActive = false;
+        candidateSamples = 0;
+        acceptedPressure = sample;
+        return acceptedPressure;
+    }
+
+    if (++candidateSamples >= PRESSURE_SPIKE_CONFIRM_SAMPLES) {
+        // A persistent transition is real inflation/deflation. Together with
+        // the median window its added latency is about 20 ms, below one 30 Hz
+        // UI frame.
+        candidateActive = false;
+        candidateSamples = 0;
+        acceptedPressure = sample;
+    }
+    return acceptedPressure;
+}
+
 void processSample(int32_t raw, uint32_t milliVolts) {
     // Discard mode-transition samples before calculating the empty-cuff zero.
     if (warmupSamples < WARMUP_SAMPLE_COUNT) {
@@ -1230,11 +1332,14 @@ void processSample(int32_t raw, uint32_t milliVolts) {
               SENSOR_FULL_SCALE_MMHG / usableSpanMv;
     p *= PRESSURE_GAIN_CORRECTION;
     p = constrain(p, -20.0f, GAUGE_MAX_MMHG);
-    // No smoothing or low-pass: publish the scaled ADC sample directly.
+    const float cleanPressure = rejectTransientPressureSpike(
+        medianPressureSample(p));
     latestRaw = raw;
     latestMilliVolts = milliVolts;
     adcSaturated = raw >= ADC_RESOLUTION_MAX - 3 || milliVolts >= 3050;
-    targetPressure = max(0.0f, p);
+    // UI and synthetic range decisions share the cleaned physical pressure.
+    // The fixed synthetic ripple is still added afterwards in updateUi().
+    targetPressure = max(0.0f, cleanPressure);
     const uint32_t nowMs = millis();
     updateFakePulse(targetPressure, adcSaturated, nowMs);
 }
