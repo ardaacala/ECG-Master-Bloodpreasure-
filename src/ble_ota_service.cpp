@@ -336,7 +336,8 @@ bool bleOtaServiceBegin(NimBLEServer *server) {
     NimBLECharacteristic *control = service->createCharacteristic(
         BLE_OTA_CONTROL_UUID, NIMBLE_PROPERTY::WRITE, 64);
     NimBLECharacteristic *data = service->createCharacteristic(
-        BLE_OTA_DATA_UUID, NIMBLE_PROPERTY::WRITE,
+        BLE_OTA_DATA_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR,
         BLE_OTA_DATA_VALUE_BYTES);
     statusCharacteristic = service->createCharacteristic(
         BLE_OTA_STATUS_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY,

@@ -104,6 +104,20 @@ async def wait_for_status(
             return status
 
 
+async def write_gatt(
+    client: BleakClient,
+    characteristic,
+    payload: bytes,
+    *,
+    response: bool,
+    timeout: float = 10.0,
+) -> None:
+    await asyncio.wait_for(
+        client.write_gatt_char(characteristic, payload, response=response),
+        timeout,
+    )
+
+
 async def find_device(name: str, address: str | None, timeout: float):
     if address:
         return address
@@ -162,7 +176,9 @@ async def upload(args: argparse.Namespace) -> None:
             start_packet = START_STRUCT.pack(
                 CMD_START, len(image), image_crc, len(password)
             ) + password
-            await client.write_gatt_char(control, start_packet, response=True)
+            await write_gatt(
+                client, control, start_packet, response=True, timeout=15.0
+            )
             transfer_started = True
             ready = await wait_for_status(status_queue, {STATUS_READY}, 45.0)
 
@@ -182,8 +198,11 @@ async def upload(args: argparse.Namespace) -> None:
             while offset < len(image):
                 chunk = image[offset : offset + chunk_size]
                 packet = OFFSET_STRUCT.pack(offset) + chunk
-                await client.write_gatt_char(
-                    data_characteristic, packet, response=True
+                # Device-level offset ACK is the authoritative flow control.
+                # WRITE_NR avoids a Windows GATT response deadlock observed
+                # during long transfers while retaining one-in-flight safety.
+                await write_gatt(
+                    client, data_characteristic, packet, response=False
                 )
                 expected_offset = offset + len(chunk)
                 acknowledgement = await wait_for_status(
@@ -206,8 +225,8 @@ async def upload(args: argparse.Namespace) -> None:
                     )
                     next_report = percent + 1
 
-            await client.write_gatt_char(
-                control, bytes([CMD_FINISH]), response=True
+            await write_gatt(
+                client, control, bytes([CMD_FINISH]), response=True
             )
             complete = await wait_for_status(
                 status_queue, {STATUS_COMPLETE}, 30.0
@@ -220,8 +239,9 @@ async def upload(args: argparse.Namespace) -> None:
         except BaseException:
             if transfer_started and client.is_connected:
                 try:
-                    await client.write_gatt_char(
-                        control, bytes([CMD_ABORT]), response=True
+                    await write_gatt(
+                        client, control, bytes([CMD_ABORT]),
+                        response=True, timeout=3.0
                     )
                 except Exception:
                     pass
