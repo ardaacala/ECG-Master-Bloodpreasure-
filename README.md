@@ -21,6 +21,7 @@ slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 - Açık/koyu tema ve 2 saniye basılı tutarak ekran açma/kapatma.
 - Filtreli batarya voltajı ve lookup-table tabanlı yüzde göstergesi.
 - Parola korumalı Wi-Fi OTA firmware yükleme desteği.
+- PC'den parola kontrollü BLE OTA firmware yükleme desteği.
 - QMI8658 hareket algılamasıyla 5 dakika hareketsizlikte otomatik düşük güç bekleme.
 
 ## Donanım ve pinler
@@ -140,6 +141,40 @@ OTA başladığında yeni trigger üretimi ve otomatik standby geçici olarak du
 Başarılı aktarım sonunda S3 otomatik yeniden başlar. OTA sırasında bağlantının
 kesilmemesi için bilgisayarın `ECG_MASTER` ağından ayrılmaması gerekir.
 
+### PC üzerinden BLE OTA yükleme
+
+BLE OTA destekli firmware ilk kez USB ile yüklenmelidir. Sonraki güncellemelerde
+bilgisayarın Bluetooth'u üzerinden, Wi-Fi ağına bağlanmadan yükleme yapılabilir.
+Cihaz beş dakikalık hareketsizlik uykusundaysa önce hareket ettirerek veya ekrana
+dokunarak uyandırın.
+
+```powershell
+python -m platformio run -e esp32-s3-touch-amoled-1-43
+python tools/ble_ota_upload.py
+```
+
+Araç varsayılan olarak
+`.pio/build/esp32-s3-touch-amoled-1-43/firmware.bin` dosyasını ve
+`BP_TRIGGER_MASTER` cihazını kullanır. Bir başka dosya veya parola için:
+
+```powershell
+$env:BP_BLE_OTA_PASSWORD="YEREL_OTA_PAROLASI"
+python tools/ble_ota_upload.py path\to\firmware.bin
+Remove-Item Env:BP_BLE_OTA_PASSWORD
+```
+
+Yalnızca `firmware.bin` kullanın; birleşik `firmware.factory.bin` BLE OTA için
+uygun değildir. Aktarım her parçayı cihazdan ACK aldıktan sonra ilerletir; toplam
+boyut, paket sırası, CRC32 ve ESP firmware imzası doğrulanmadan yeni bölüm boot
+edilmez. Aktarım sırasında trigger üretimi, BLE slave taraması ve otomatik standby
+geçici olarak durur; UI Core 1'de 30 Hz çalışmaya devam eder.
+
+BLE OTA parolası `BLE_OTA_PASSWORD` ile ayrı tanımlanabilir; tanımlanmazsa
+`OTA_PASSWORD` kullanılır. Bu parola yakındaki yanlışlıkla yapılan yüklemeleri
+engeller ancak mevcut bağlantı eşleştirme/şifreleme zorunlu tutmadığı için güçlü
+kriptografik kimlik doğrulama değildir. Güncellemeyi güvenilen fiziksel ortamda
+yapın ve özel kurulumlarda ignored `include/secrets.h` ile benzersiz parola seçin.
+
 ## Ekran hareketleri
 
 - Açık temada sağdan sola kaydırma: koyu tema.
@@ -184,6 +219,8 @@ ayrı bir VBUS/STAT bağlantısı olmadan tamamen çözülemez.
 - `src/main.cpp`: ADC, sahte nabız, UI, dokunmatik ve görev dağılımı.
 - `src/wifi_master.cpp`: Wi-Fi AP, TCP slave ve saat senkronizasyonu.
 - `src/ble_master.cpp`: BLE slave ve telefon GATT kontrolü.
+- `src/ble_ota_service.cpp`: PC BLE OTA protokolü ve Core 0 flash yazma görevi.
+- `tools/ble_ota_upload.py`: Windows/macOS/Linux için Bleak tabanlı PC yükleyici.
 - `include/config.h`: ağ, cihaz kimliği, pin ve zamanlama sabitleri.
 - `include/protocol.h`: Wi-Fi/BLE paketleri ve UUID'ler.
 - `AGENTS.md` / `CLAUDE.md`: Codex ve Claude için güvenli çalışma kuralları.

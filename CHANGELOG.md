@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- PC üzerinden `BP_TRIGGER_MASTER` cihazına Wi-Fi gerektirmeden firmware gönderen
+  ayrı bir BLE OTA GATT servisi ve Bleak tabanlı yükleme aracı ekler.
+- Parça sırası/offset ACK'i, tam görüntü CRC32 kontrolü ve ESP OTA imaj doğrulaması
+  başarısızsa çalışan partition'ı korur.
+- BLE OTA sırasında sentetik tetikleme, slave taraması ve standby geçişini durdurur;
+  flash yazmayı Core 0'daki bloklanan bir görevde yaparak 30 Hz Core 1 UI yapısını
+  korur.
+
 ## 2.1.1 - 2026-09-09
 
 - Basınç sensörüne Core 0 üzerinde çalışan, sabit bellekli 5 örnek median filtre

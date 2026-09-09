@@ -1,4 +1,5 @@
 #include "ble_master.h"
+#include "ble_ota_service.h"
 #include "config.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
@@ -55,7 +56,8 @@ class PhoneServerCallbacks : public NimBLEServerCallbacks {
         publishPhoneText(status);
     }
 
-    void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
+    void onDisconnect(NimBLEServer *, NimBLEConnInfo &info, int reason) override {
+        bleOtaServiceOnDisconnect(info.getConnHandle());
         phoneConnected = false;
         Serial.printf("[BLE PHONE] disconnected, reason=%d\n", reason);
         NimBLEDevice::startAdvertising();
@@ -66,6 +68,10 @@ static PhoneServerCallbacks phoneServerCallbacks;
 class PhoneCommandCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic *characteristic,
                  NimBLEConnInfo &) override {
+        if (bleOtaInProgress()) {
+            publishPhoneText("ERR OTA BUSY");
+            return;
+        }
         std::string value = characteristic->getValue();
         while (!value.empty() && isspace((unsigned char)value.front())) value.erase(0, 1);
         while (!value.empty() && isspace((unsigned char)value.back())) value.pop_back();
@@ -174,6 +180,9 @@ static void beginPhoneControlService() {
         CONTROL_TX_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     command->setCallbacks(&phoneCommandCallbacks);
     phoneStatus->setValue("WRITE BPM OR BPM,SYS,DIA");
+    if (!bleOtaServiceBegin(server)) {
+        Serial.println("[BLE OTA] service initialization failed");
+    }
     NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
     advertising->setName("BP_TRIGGER_MASTER");
     advertising->addServiceUUID(CONTROL_SERVICE_UUID);
@@ -269,6 +278,7 @@ void bleMasterBegin() {
     triggerQueue = xQueueCreate(BLE_TRIGGER_QUEUE_LENGTH, sizeof(BleTriggerPacket));
     phoneTriggerQueue = xQueueCreate(8, sizeof(BlePhoneCommand));
     NimBLEDevice::init("ECG_MASTER_WIFI_BLE");
+    NimBLEDevice::setMTU(247);
     beginPhoneControlService();
     NimBLEScan *scan = NimBLEDevice::getScan();
     scan->setScanCallbacks(&scanCallbacks);
@@ -291,6 +301,9 @@ void bleMasterBegin() {
 }
 
 void bleMasterTick() {
+    // Keep the BLE host available for the OTA GATT server, but suspend slave
+    // scanning and sync traffic while firmware chunks are written to flash.
+    if (bleOtaInProgress()) return;
     connectPending();
     NimBLEScan *scan = NimBLEDevice::getScan();
     if (!connected && !pendingDevice && !scan->isScanning()) scan->start(5000, false);

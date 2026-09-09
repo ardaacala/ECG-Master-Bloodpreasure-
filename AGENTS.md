@@ -48,6 +48,10 @@ Version 2 behavior unless the user explicitly requests a hardware migration.
 - UUIDs and packed transport structs in `include/protocol.h` are shared contracts;
   changing them requires matching slave/app changes.
 - When changing a transport packet, update and build its matching slave project.
+- PC BLE OTA uses the dedicated `BLE_OTA_*` UUIDs and packed structs in
+  `include/protocol.h`; keep `tools/ble_ota_upload.py` in sync with them.
+- BLE OTA accepts only the environment's `firmware.bin`, never the combined
+  `firmware.factory.bin`. Preserve offset ACK, CRC32 and ESP image validation.
 
 ## Repository hygiene
 

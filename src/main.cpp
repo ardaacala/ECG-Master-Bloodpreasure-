@@ -11,6 +11,7 @@
 #include "protocol.h"
 #include "wifi_master.h"
 #include "ble_master.h"
+#include "ble_ota_service.h"
 #include "ota_service.h"
 
 // The active 466x466 round Waveshare board routes its onboard BAT_ADC divider
@@ -409,7 +410,9 @@ bool sendPulseTrigger(PulseType pulseType = PULSE_LARGE,
                       uint64_t targetMask = 0,
                       int64_t *executeAtResultUs = nullptr,
                       uint32_t *eventIdResult = nullptr) {
-    if (standbyEntering || otaServiceInProgress()) return false;
+    if (standbyEntering || otaServiceInProgress() || bleOtaInProgress()) {
+        return false;
+    }
     const int64_t executeAtUs = esp_timer_get_time() +
                                 FIXED_TRIGGER_LEAD_US;
     uint32_t eventId = 0;
@@ -1068,7 +1071,7 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
         displayedBeatAtUs = 0;
     };
 
-    if (otaServiceInProgress()) {
+    if (otaServiceInProgress() || bleOtaInProgress()) {
         rangeActive = false;
         nextBeatMs = 0;
         outOfRangeSinceMs = 0;
@@ -1737,7 +1740,7 @@ void setup() {
 }
 
 void loop() {
-    otaServiceHandle();
+    if (!bleOtaInProgress()) otaServiceHandle();
     updateMotionActivity();
     updateTouchGesture();
     BlePhoneCommand phoneCommand{};
@@ -1769,7 +1772,7 @@ void loop() {
     }
     const uint32_t now = millis();
     if (imuMotionWakeAvailable && !standbyEntering &&
-        !otaServiceInProgress() &&
+        !otaServiceInProgress() && !bleOtaInProgress() &&
         now - lastMotionActivityMs >= STANDBY_TIMEOUT_MS) {
         enterMotionStandby();
     }

@@ -36,3 +36,38 @@ struct __attribute__((packed)) BleLedOnAck { uint8_t type; uint32_t eventId; int
 static const char CONTROL_SERVICE_UUID[] = "7d2e0001-8d7b-4f91-a8d3-4c7f2b6a1000";
 static const char CONTROL_RX_UUID[]      = "7d2e0002-8d7b-4f91-a8d3-4c7f2b6a1000";
 static const char CONTROL_TX_UUID[]      = "7d2e0003-8d7b-4f91-a8d3-4c7f2b6a1000";
+
+// PC-to-master BLE firmware update service. This is intentionally separate
+// from the phone-control and physical-slave services so their contracts remain
+// unchanged. All multi-byte fields are little-endian.
+static const char BLE_OTA_SERVICE_UUID[] = "7d2e0011-8d7b-4f91-a8d3-4c7f2b6a1000";
+static const char BLE_OTA_CONTROL_UUID[] = "7d2e0012-8d7b-4f91-a8d3-4c7f2b6a1000";
+static const char BLE_OTA_DATA_UUID[]    = "7d2e0013-8d7b-4f91-a8d3-4c7f2b6a1000";
+static const char BLE_OTA_STATUS_UUID[]  = "7d2e0014-8d7b-4f91-a8d3-4c7f2b6a1000";
+
+enum BleOtaCommand : uint8_t {
+    BLE_OTA_CMD_START = 1,
+    BLE_OTA_CMD_FINISH = 2,
+    BLE_OTA_CMD_ABORT = 3
+};
+
+enum BleOtaStatusCode : uint8_t {
+    BLE_OTA_STATUS_READY = 1,
+    BLE_OTA_STATUS_ACK = 2,
+    BLE_OTA_STATUS_COMPLETE = 3,
+    BLE_OTA_STATUS_ABORTED = 4,
+    BLE_OTA_STATUS_ERROR = 0x80
+};
+
+struct __attribute__((packed)) BleOtaStartHeader {
+    uint8_t command;
+    uint32_t imageSize;
+    uint32_t imageCrc32;
+    uint8_t passwordLength;
+};
+
+struct __attribute__((packed)) BleOtaStatus {
+    uint8_t code;
+    uint32_t nextOffset;
+    int32_t detail;
+};
