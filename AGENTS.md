@@ -52,6 +52,7 @@ Version 2 behavior unless the user explicitly requests a hardware migration.
 ## Repository hygiene
 
 - Do not commit `.pio`, COM-port overrides, debug logs, local drivers, or `.codex_*`.
-- Do not commit either master or slave `secrets.h` file. Public builds use the
-  `CHANGE_ME` fallback; local hardware builds use ignored secrets files.
+- Do not commit either master or slave `secrets.h` file. The documented project
+  default is `ECG_MASTER` / `ecgmaster123` in both committed config fallbacks;
+  local overrides use ignored secrets files and must remain identical.
 - Prefer small changes; do not rewrite the working architecture for style alone.

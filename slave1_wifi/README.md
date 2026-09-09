@@ -15,6 +15,7 @@ Ornek yukleme:
 pio run -e slave-gpio2-active-high -t upload --upload-port COM3
 ```
 
-Yuklemeden once `include/secrets.example.h` dosyasini `include/secrets.h`
-olarak kopyalayip master ile ayni Wi-Fi parolasini girin. Gercek secrets dosyasi
+Belgelenmis varsayilan parola `ecgmaster123` ve master ile aynidir. Farkli bir
+yerel parola icin `include/secrets.example.h` dosyasini `include/secrets.h`
+olarak kopyalayip iki tarafta da ayni degeri kullanin. Gercek secrets dosyasi
 Git'e eklenmez.

@@ -1,19 +1,21 @@
-# Blood Pressure Wi-Fi + BLE Master — Version 2.1
+# Blood Pressure Wi-Fi + BLE Master — Version 2.1.1
 
 Waveshare ESP32-S3 Touch AMOLED 1.43 (466×466) için PlatformIO tabanlı tansiyon
 simülatörü/master firmware'i. Ekrandaki kadran, sentetik nabız salınımı, Wi-Fi
 slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 
-> Bu depo `v2.1.0` donanım düzenini hedefler. 1.91 inç veya farklı pin dizilimli
+> Bu depo `v2.1.1` donanım düzenini hedefler. 1.91 inç veya farklı pin dizilimli
 > kartlara doğrudan yüklenmemelidir.
 
-## Version 2.1 özellikleri
+## Version 2.1.1 özellikleri
 
 - 30 Hz AMOLED arayüzü; UI görevi Core 1'de, radyo ve ADC işleri Core 0'da.
 - Gerçek nabız araması kapalı; yalnızca ayarlanabilir sentetik BPM kullanılır.
 - Sentetik salınım tepe değeri `1.5 mmHg`; fiziksel LED ve UI LED'iyle aynı anda başlar.
 - BPM aralığı 30–240, tekrar tetikleme koruması 200 ms.
 - Sentetik nabız yalnızca diyastolik ve sistolik basınç sınırları arasında çalışır.
+- Basınç sensöründeki süreksiz sıçramaları 5 örnek median ve yaklaşık 20 ms
+  süreklilik doğrulamasıyla UI ve trigger sınırlarına ulaşmadan engeller.
 - Wi-Fi ve BLE slave'lere ortak, ileri tarihli tetikleme zamanı gönderilir.
 - Telefonda BLE üzerinden BPM ve basınç aralığı ayarlanabilir.
 - Açık/koyu tema ve 2 saniye basılı tutarak ekran açma/kapatma.
@@ -85,15 +87,20 @@ python -m platformio run
 VS Code PlatformIO eklentisi de doğrudan `platformio.ini` dosyasını kullanabilir.
 ESP32 platformu `55.03.311`, kütüphaneler de kesin sürümlere sabitlenmiştir.
 
-Donanıma yüklemeden önce güvenli yapılandırmayı oluşturun:
+Projenin master ve Wi-Fi slave için belgelenmiş varsayılan ağı:
+
+- SSID: `ECG_MASTER`
+- Parola: `ecgmaster123`
+
+Bu değerler temiz bir repository derlemesinde doğrudan çalışır. Farklı bir yerel
+parola kullanmak için güvenli yapılandırmayı oluşturun:
 
 ```powershell
 Copy-Item include/secrets.example.h include/secrets.h
 ```
 
 `include/secrets.h` içindeki `WIFI_AP_PASSWORD` değerini Wi-Fi slave ile aynı
-yapın. Bu dosya Git tarafından yok sayılır ve GitHub'a gönderilmez. CI derlemesi
-parola gerekmediği için `CHANGE_ME` güvenli varsayılanını kullanır.
+yapın. Bu dosya Git tarafından yok sayılır ve GitHub'a gönderilmez.
 
 Wi-Fi slave için aynı işlemi `slave1_wifi/include/secrets.example.h` dosyasını
 `slave1_wifi/include/secrets.h` adına kopyalayarak yapın.

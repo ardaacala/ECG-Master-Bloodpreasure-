@@ -4,7 +4,8 @@
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
-#define WIFI_PASSWORD "CHANGE_ME"
+// Must match the master's documented project default.
+#define WIFI_PASSWORD "ecgmaster123"
 #endif
 #define MASTER_IP_1 192
 #define MASTER_IP_2 168

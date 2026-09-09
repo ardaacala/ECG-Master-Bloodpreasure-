@@ -6,9 +6,8 @@
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
-// Public-repository fallback. Copy secrets.example.h to secrets.h and set the
-// same password in the slave firmware before using real hardware.
-#define WIFI_AP_PASSWORD "CHANGE_ME"
+// Documented project default. A local ignored secrets.h may override it.
+#define WIFI_AP_PASSWORD "ecgmaster123"
 #endif
 #define WIFI_TCP_PORT 3333
 #define MAX_WIFI_CLIENTS 8

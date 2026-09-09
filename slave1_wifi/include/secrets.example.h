@@ -1,4 +1,4 @@
 #pragma once
 
-// Copy to secrets.h and use the same password as the master.
-#define WIFI_PASSWORD "CHANGE_ME"
+// Optional local override; keep it identical to the master password.
+#define WIFI_PASSWORD "ecgmaster123"

@@ -1,8 +1,8 @@
 #pragma once
 
-// Copy this file to include/secrets.h. The real file is intentionally ignored
-// by Git. Master and Wi-Fi slave must use the same access-point password.
-#define WIFI_AP_PASSWORD "CHANGE_ME"
+// Optional local override. The committed project default is ecgmaster123.
+// Copy this file to include/secrets.h if a different password is required.
+#define WIFI_AP_PASSWORD "ecgmaster123"
 
 // Optional: omit this line to reuse WIFI_AP_PASSWORD for OTA authentication.
-// #define OTA_PASSWORD "CHANGE_ME"
+// #define OTA_PASSWORD "ecgmaster123"

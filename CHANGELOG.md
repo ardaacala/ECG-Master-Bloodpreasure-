@@ -1,12 +1,15 @@
 # Changelog
 
-## Unreleased — Pressure spike filtering hotfix
+## 2.1.1 - 2026-09-09
 
 - Basınç sensörüne Core 0 üzerinde çalışan, sabit bellekli 5 örnek median filtre
   ve 2.5 mmHg üzerindeki ani adımlar için 8 örneklik süreklilik doğrulaması ekler.
 - Eski seviyeye geri dönen kısa ADC sıçramalarını UI ve sentetik BPM basınç
   sınırlarına ulaşmadan atar; kalıcı gerçek basınç değişimini yaklaşık 20 ms'de
   kabul eder. Sentetik 1.5 mmHg ripple filtre sonrasında eklenmeye devam eder.
+- Master ve Wi-Fi slave için belgelenmiş temiz-kurulum varsayılanını
+  `ECG_MASTER` / `ecgmaster123` yapar; ignored `secrets.h` ile yerel override
+  desteğini korur.
 
 ## 2.1.0 - 2026-09-09
 
