@@ -43,9 +43,10 @@ struct __attribute__((packed)) LedOnAck { uint8_t type; uint32_t eventId; int32_
 struct __attribute__((packed)) HelloPacket { uint8_t type; uint8_t deviceId; char deviceName[DEVICE_NAME_MAX_LENGTH]; };
 struct __attribute__((packed)) DeviceStatusPacket { uint8_t type; uint8_t deviceId; int8_t rssiDbm; uint32_t lateDrops; uint32_t queueRejects; };
 
-// State-based V3 contract. The master sends this only when semantic content
-// changes, or once after a device reconnects. Periodic clock synchronization
-// remains a separate transport concern. receiverDeviceId=0 means broadcast.
+// State-based V3 contract. The master sends immediately on semantic changes or
+// reconnect, then repeats unchanged state with a 1..10 second exponential
+// heartbeat. Periodic clock synchronization remains separate.
+// receiverDeviceId=0 means broadcast.
 struct __attribute__((packed)) TriggerStatePacket {
     uint8_t type;
     uint8_t protocolVersion;

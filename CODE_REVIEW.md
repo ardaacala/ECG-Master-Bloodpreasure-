@@ -6,8 +6,9 @@ Her değişiklikten sonra aşağıdakileri kontrol edin:
 - UI görevi Core 1'de ve 30 Hz zaman çizgisinde kalıyor mu?
 - Ağ/ADC işleri Core 0'da bloklamadan çalışıyor mu?
 - UI ve fiziksel slave'lerin ilk fazi aynı planlanmış timestamp'i kullanıyor mu?
-- State yalniz semantik degisiklikte veya reconnect sonrasi gonderiliyor mu?
-- ACK yokken 500 ms aralikla en fazla uc deneme yapiliyor mu?
+- State degisiklik/reconnect aninda hemen gonderiliyor mu?
+- Degismeyen state `1, 2, 4, 8, 10, 10...` saniye araliklarla tekrarlaniyor ve
+  backoff state degisiminde/reconnect'te sifirlaniyor mu?
 - Duplicate state slave flash'ini yeniden yazmadan `UNCHANGED` ACK veriyor mu?
 - Global 200 ms duplicate guard korunuyor mu?
 - Gerçek cuff nabız algılayıcısı yanlışlıkla tekrar etkinleştirildi mi?

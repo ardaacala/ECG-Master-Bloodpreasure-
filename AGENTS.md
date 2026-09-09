@@ -37,8 +37,10 @@ Version 3 behavior unless the user explicitly requests a hardware migration.
   on every beat.
 - V3 physical slaves retain the latest trigger state and generate BPM locally.
   Their first beat and the UI use the same scheduled execution timestamp.
-- Send `TriggerStatePacket` only when BPM/zone/delay changes or once after
-  reconnect. Retry at most three times at 500 ms until a matching revision ACK.
+- Send `TriggerStatePacket` immediately when BPM/zone/delay changes or after a
+  reconnect. While unchanged, repeat it at 1, 2, 4, 8, 10, 10... second
+  intervals; reset the backoff on state change or reconnect. A matching ACK is
+  health confirmation and does not stop the 10-second heartbeat.
 - Periodic time synchronization remains separate from trigger-state delivery.
 - Synthetic pulse generation is the only automatic beat source. Do not re-enable
   the disabled real cuff-pulse detector unless explicitly requested.

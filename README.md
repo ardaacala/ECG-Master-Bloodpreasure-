@@ -9,13 +9,15 @@ slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 
 ## Version 3.0.0 state trigger
 
-- Master artik her sentetik nabizda ag paketi gondermez. Yalniz BPM veya basinc
-  bolgesi degistiginde state paketi yollar; yeniden baglanan cihaza mevcut state
-  bir kez tekrar iletilir.
+- Master artik her sentetik nabizda ag paketi gondermez. BPM veya basinc bolgesi
+  degistiginde ve slave yeniden baglandiginda state paketini hemen yollar.
 - State paketi alici cihaz ID'si, BPM, `BELOW/INSIDE/ABOVE` basinc bolgesi,
   opsiyonel gecikme, revision ve ortak baslangic zamanini tasir.
-- ACK gelmezse 500 ms arayla en fazla uc deneme yapilir; degismeyen state icin
-  sonsuz/periyodik trafik olusmaz.
+- State degismedikce saglik/yeniden toparlanma yayini `1, 2, 4, 8, 10, 10...`
+  saniyelik exponansiyel araliklarla surer. State degisince veya reconnect olunca
+  zamanlama sifirlanir ve yeni paket yine hemen gonderilir.
+- ACK, slave'in revision'i uyguladigini veya zaten ayni state'e sahip oldugunu
+  dogrular; ACK alinmasi 10 saniyelik seyrek heartbeat'i durdurmaz.
 - Wi-Fi ve BLE slave son state'i NVS flash'ta tutar. Ayni semantik state tekrar
   gelirse flash yeniden yazilmaz; cihaz yeniden acildiginda saklanan state kullanilir.
 - Basinc bolgesi `INSIDE` iken slave BPM ritmini yerel olarak uretir. `BELOW` ve

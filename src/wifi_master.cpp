@@ -30,7 +30,7 @@ struct ClientRuntime {
     uint32_t acknowledgedStateRevision;
     uint32_t pendingStateRevision;
     uint32_t lastStateSendMs;
-    uint8_t stateSendAttempts;
+    uint32_t stateSendIntervalMs;
     uint8_t rxBuffer[sizeof(HelloPacket)];
     size_t rxLength;
 };
@@ -70,8 +70,8 @@ static uint32_t totalMissed = 0;
 static TriggerStatePacket latestTriggerState{};
 static bool latestTriggerStateValid = false;
 static constexpr uint8_t TRIGGER_STATE_PROTOCOL_VERSION = 3;
-static constexpr uint8_t TRIGGER_STATE_MAX_ATTEMPTS = 3;
-static constexpr uint32_t TRIGGER_STATE_RETRY_MS = 500;
+static constexpr uint32_t TRIGGER_STATE_INITIAL_INTERVAL_MS = 1000;
+static constexpr uint32_t TRIGGER_STATE_MAX_INTERVAL_MS = 10000;
 
 struct EventAudit {
     uint32_t eventId;
@@ -203,10 +203,14 @@ static void handlePacket(uint8_t index, const uint8_t *data, size_t length) {
             ack.stateRevision != node.pendingStateRevision) return;
         if (ack.result == TRIGGER_STATE_APPLIED ||
             ack.result == TRIGGER_STATE_UNCHANGED) {
+            const bool firstAckForRevision =
+                node.acknowledgedStateRevision != ack.stateRevision;
             node.acknowledgedStateRevision = ack.stateRevision;
-            Serial.printf("[STATE] WiFi device %u revision %lu ACK result=%u\n",
-                          node.deviceId, (unsigned long)ack.stateRevision,
-                          ack.result);
+            if (firstAckForRevision) {
+                Serial.printf("[STATE] WiFi device %u revision %lu ACK result=%u\n",
+                              node.deviceId, (unsigned long)ack.stateRevision,
+                              ack.result);
+            }
         } else {
             Serial.printf("[STATE] WiFi device %u revision %lu rejected=%u\n",
                           node.deviceId, (unsigned long)ack.stateRevision,
@@ -404,26 +408,29 @@ void wifiMasterTick() {
             const bool isReceiver = latestTriggerStateValid &&
                 (latestTriggerState.receiverDeviceId == 0 ||
                  latestTriggerState.receiverDeviceId == node.deviceId);
-            if (isReceiver && quality < 3 &&
-                node.acknowledgedStateRevision !=
-                    latestTriggerState.stateRevision) {
+            if (isReceiver && quality < 3) {
                 if (node.pendingStateRevision !=
                     latestTriggerState.stateRevision) {
                     node.pendingStateRevision =
                         latestTriggerState.stateRevision;
-                    node.stateSendAttempts = 0;
                     node.lastStateSendMs = 0;
+                    node.stateSendIntervalMs =
+                        TRIGGER_STATE_INITIAL_INTERVAL_MS;
                 }
-                if (node.stateSendAttempts < TRIGGER_STATE_MAX_ATTEMPTS &&
-                    (node.lastStateSendMs == 0 ||
-                     clientNowMs - node.lastStateSendMs >=
-                         TRIGGER_STATE_RETRY_MS)) {
+                if (node.lastStateSendMs == 0 ||
+                    clientNowMs - node.lastStateSendMs >=
+                        node.stateSendIntervalMs) {
+                    const bool immediateSend = node.lastStateSendMs == 0;
                     node.lastStateSendMs = clientNowMs;
-                    ++node.stateSendAttempts;
                     if (!sendBytes(node, &latestTriggerState,
                                    sizeof(latestTriggerState))) {
                         disconnectClient(index);
                         continue;
+                    }
+                    if (!immediateSend) {
+                        node.stateSendIntervalMs = min<uint32_t>(
+                            node.stateSendIntervalMs * 2,
+                            TRIGGER_STATE_MAX_INTERVAL_MS);
                     }
                 }
             }

@@ -4,10 +4,13 @@
 
 ## 3.0.0 - 2026-09-09
 
+- State degismese de baglanti sagligini ve kacirilan paketlerden otomatik
+  toparlanmayi korumak icin yayin araligini `1, 2, 4, 8, 10, 10...` saniye
+  seklinde exponansiyel yapar; state degisiminde ve reconnect'te hemen sifirlar.
 - Per-beat Wi-Fi/BLE trigger paketlerini, alici ID + BPM + basinc bolgesi +
   opsiyonel gecikme iceren retained state protokoluyle degistirir.
-- State'i yalnizca icerigi degistiginde veya slave yeniden baglandiginda yollar;
-  ACK beklerken 500 ms aralikla en fazla uc deneme yapar.
+- State'i degisiklik/reconnect aninda hemen, ardindan 1-10 saniye exponansiyel
+  heartbeat ile yollar; her paketin revision ACK'ini izler.
 - Wi-Fi ve BLE slave'lerde state'i semantik degisiklikte NVS'ye kaydeder,
   duplicate pakette flash yazimini atlar ve reboot sonrasinda yerel BPM uretimini
   saklanan state ile surdurur.

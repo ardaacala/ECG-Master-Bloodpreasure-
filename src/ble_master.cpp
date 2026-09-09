@@ -41,12 +41,12 @@ static bool latestTriggerStateValid = false;
 static uint32_t acknowledgedStateRevision = 0;
 static uint32_t pendingStateRevision = 0;
 static uint32_t lastStateSendMs = 0;
-static uint8_t stateSendAttempts = 0;
+static uint32_t stateSendIntervalMs = 0;
 
 static constexpr uint8_t BLE_TRIGGER_QUEUE_LENGTH = 16;
 static constexpr uint8_t TRIGGER_STATE_PROTOCOL_VERSION = 3;
-static constexpr uint8_t TRIGGER_STATE_MAX_ATTEMPTS = 3;
-static constexpr uint32_t TRIGGER_STATE_RETRY_MS = 500;
+static constexpr uint32_t TRIGGER_STATE_INITIAL_INTERVAL_MS = 1000;
+static constexpr uint32_t TRIGGER_STATE_MAX_INTERVAL_MS = 10000;
 
 static void publishPhoneText(const char *text) {
     if (!phoneStatus || !text) return;
@@ -207,8 +207,8 @@ class ClientCallbacks : public NimBLEClientCallbacks {
         bestRttUs = INT64_MAX;
         acknowledgedStateRevision = 0;
         pendingStateRevision = 0;
-        stateSendAttempts = 0;
         lastStateSendMs = 0;
+        stateSendIntervalMs = 0;
         Serial.printf("[BLE] %s disconnected, reason=%d\n", BLE_NODE_NAME, reason);
     }
 };
@@ -243,10 +243,15 @@ static void onNotify(NimBLERemoteCharacteristic *characteristic,
             ack.stateRevision == pendingStateRevision) {
             if (ack.result == TRIGGER_STATE_APPLIED ||
                 ack.result == TRIGGER_STATE_UNCHANGED) {
+                const bool firstAckForRevision =
+                    acknowledgedStateRevision != ack.stateRevision;
                 acknowledgedStateRevision = ack.stateRevision;
-                Serial.printf("[STATE] BLE device %u revision %lu ACK result=%u\n",
-                              BLE_NODE_ID, (unsigned long)ack.stateRevision,
-                              ack.result);
+                if (firstAckForRevision) {
+                    Serial.printf("[STATE] BLE device %u revision %lu ACK result=%u\n",
+                                  BLE_NODE_ID,
+                                  (unsigned long)ack.stateRevision,
+                                  ack.result);
+                }
             } else {
                 Serial.printf("[STATE] BLE device %u revision %lu rejected=%u\n",
                               BLE_NODE_ID, (unsigned long)ack.stateRevision,
@@ -307,8 +312,8 @@ static void connectPending() {
     lastSyncRequestMs = 0;
     acknowledgedStateRevision = 0;
     pendingStateRevision = 0;
-    stateSendAttempts = 0;
     lastStateSendMs = 0;
+    stateSendIntervalMs = 0;
     Serial.printf("[BLE] %s connected\n", BLE_NODE_NAME);
 }
 
@@ -370,22 +375,25 @@ void bleMasterTick() {
     const bool isReceiver = latestTriggerStateValid &&
         (latestTriggerState.receiverDeviceId == 0 ||
          latestTriggerState.receiverDeviceId == BLE_NODE_ID);
-    if (connected && synced && rx && isReceiver &&
-        acknowledgedStateRevision != latestTriggerState.stateRevision) {
+    if (connected && synced && rx && isReceiver) {
         if (pendingStateRevision != latestTriggerState.stateRevision) {
             pendingStateRevision = latestTriggerState.stateRevision;
-            stateSendAttempts = 0;
             lastStateSendMs = 0;
+            stateSendIntervalMs = TRIGGER_STATE_INITIAL_INTERVAL_MS;
         }
-        if (stateSendAttempts < TRIGGER_STATE_MAX_ATTEMPTS &&
-            (lastStateSendMs == 0 ||
-             nowMs - lastStateSendMs >= TRIGGER_STATE_RETRY_MS)) {
+        if (lastStateSendMs == 0 ||
+            nowMs - lastStateSendMs >= stateSendIntervalMs) {
+            const bool immediateSend = lastStateSendMs == 0;
             lastStateSendMs = nowMs;
-            ++stateSendAttempts;
             if (!rx->writeValue((uint8_t *)&latestTriggerState,
                                 sizeof(latestTriggerState), false)) {
                 Serial.printf("[STATE] BLE revision %lu send failed\n",
                               (unsigned long)latestTriggerState.stateRevision);
+            }
+            if (!immediateSend) {
+                stateSendIntervalMs = min<uint32_t>(
+                    stateSendIntervalMs * 2,
+                    TRIGGER_STATE_MAX_INTERVAL_MS);
             }
         }
     }

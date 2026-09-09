@@ -7,7 +7,8 @@ This document is the integration contract for `v3.0.0`, named
 
 V2 sent one transport packet for every synthetic heartbeat. V3 sends retained
 intent instead: a slave receives the latest BPM and pressure-zone state, stores
-it, and generates its own output locally. This permits a slave to select an LED,
+it, and generates its own output locally. The unchanged state is repeated with
+a low-rate exponential heartbeat rather than once per beat. This permits a slave to select an LED,
 sound, video, haptic pattern, or another response without changing the master's
 fixed sensor input/output behavior.
 
@@ -47,11 +48,13 @@ definitions are in `include/protocol.h` and are copied into both slave projects.
    `P <= DIA` is below, `DIA < P < SYS` is inside, and `P >= SYS` or ADC
    saturation is above.
 2. Publish a new revision only when BPM, zone, or action delay changes.
-3. Publish the current revision once after a matching slave reconnects.
-4. Retry an unacknowledged revision after 500 ms, at most three sends total.
-5. Stop after an `APPLIED` or `UNCHANGED` ACK. Do not periodically resend an
-   unchanged state.
-6. Continue periodic clock sync separately.
+3. Send immediately for a new revision and after a matching slave reconnects.
+4. While state is unchanged, send the same packet after 1, 2, 4, 8, 10, 10...
+   seconds. Ten seconds is the maximum interval.
+5. Reset this exponential schedule on a state change or reconnect.
+6. Treat `APPLIED` and `UNCHANGED` ACKs as health confirmation. An ACK does not
+   stop the low-rate heartbeat.
+7. Continue periodic clock sync separately.
 
 The current topology creates one packet for device 1 over Wi-Fi and one packet
 for device 2 over BLE. `actionDelayMs` is currently zero. The first effective
@@ -60,10 +63,10 @@ time is scheduled 600 ms ahead so the master UI and slave output share a phase.
 ## Slave rules
 
 1. Validate version, receiver ID, BPM, zone, and delay before applying a packet.
-2. Apply every valid packet immediately so a reconnect can re-anchor output
-   phase, even when its semantic content is unchanged.
+2. Apply every valid packet immediately so heartbeat/reconnect delivery can
+   re-anchor output phase, even when its semantic content is unchanged.
 3. Persist only BPM, zone, and delay. Do not persist the absolute timestamp.
-4. Compare semantic content before writing NVS. A duplicate retry must return
+4. Compare semantic content before writing NVS. A heartbeat duplicate must return
    `UNCHANGED` without another flash write.
 5. Return `PERSIST_FAILED` if new content could not be saved; do not falsely ACK
    it as durable.
