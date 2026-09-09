@@ -26,6 +26,8 @@
   dokunmayı da aktivite sayar ve WoM'u yalnızca deep sleep öncesinde kurar.
 - Hareketle uyanmada çalışma ayarlarını RTC belleğinden geri yükler; IMU
   başlatılamazsa güvenli biçimde otomatik beklemeyi devre dışı bırakır.
+- Master AP üzerinde parola korumalı ArduinoOTA hizmeti ekler; OTA aktarımı
+  sırasında trigger üretimini ve otomatik standby'ı durdurur.
 
 ## 2.0.0 - 2026-09-08
 

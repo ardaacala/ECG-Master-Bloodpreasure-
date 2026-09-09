@@ -14,6 +14,15 @@
 #define MAX_WIFI_CLIENTS 8
 #define MIN_READY_NODES 2
 
+// OTA runs on the master's existing access point. By default it reuses the
+// ignored local AP password; define OTA_PASSWORD separately in secrets.h if
+// independent credentials are preferred.
+#define OTA_HOSTNAME "bp-trigger-master"
+#define OTA_PORT 3232
+#ifndef OTA_PASSWORD
+#define OTA_PASSWORD WIFI_AP_PASSWORD
+#endif
+
 // Karma sistem: bir slave Wi-Fi, GPIO4 active-low slave BLE'dir.
 #define WIFI_NODE_ID 1
 #define BLE_NODE_ID 2

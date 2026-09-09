@@ -18,6 +18,7 @@ slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 - Telefonda BLE üzerinden BPM ve basınç aralığı ayarlanabilir.
 - Açık/koyu tema ve 2 saniye basılı tutarak ekran açma/kapatma.
 - Filtreli batarya voltajı ve lookup-table tabanlı yüzde göstergesi.
+- Parola korumalı Wi-Fi OTA firmware yükleme desteği.
 
 - QMI8658 hareket algılamasıyla 5 dakika hareketsizlikte otomatik düşük güç bekleme.
 
@@ -111,6 +112,27 @@ python -m platformio device monitor --port COM3 --baud 115200
 `COM3` örnektir. VID:PID `303A:1001` olan ESP32-S3 portu seçilmelidir. CP210x
 olarak görünen slave portlarına master firmware'i yüklemeyin. Port görünmüyorsa
 önce veri destekli USB kablosunu ve Windows Aygıt Yöneticisi'ni kontrol edin.
+
+### Wi-Fi OTA yükleme
+
+OTA destekli firmware ilk kez USB üzerinden yüklenmelidir. Sonraki yüklemelerde
+bilgisayarı master'ın `ECG_MASTER` ağına bağlayın. S3 varsayılan olarak
+`192.168.4.1:3232` adresinde `bp-trigger-master` adıyla OTA hizmeti verir.
+OTA parolası varsayılan olarak yerel ve Git tarafından yok sayılan
+`include/secrets.h` içindeki `WIFI_AP_PASSWORD` değeridir. İstenirse aynı dosyada
+ayrı bir `OTA_PASSWORD` tanımlanabilir.
+
+PowerShell üzerinden kablosuz yükleme:
+
+```powershell
+$env:PLATFORMIO_UPLOAD_FLAGS="--auth=BURAYA_OTA_PAROLASI"
+python -m platformio run -e esp32-s3-touch-amoled-1-43-ota -t upload
+Remove-Item Env:PLATFORMIO_UPLOAD_FLAGS
+```
+
+OTA başladığında yeni trigger üretimi ve otomatik standby geçici olarak durur.
+Başarılı aktarım sonunda S3 otomatik yeniden başlar. OTA sırasında bağlantının
+kesilmemesi için bilgisayarın `ECG_MASTER` ağından ayrılmaması gerekir.
 
 ## Ekran hareketleri
 
