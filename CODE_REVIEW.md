@@ -1,11 +1,14 @@
-# Version 2 Review Checklist
+# Version 3 Review Checklist
 
 Her değişiklikten sonra aşağıdakileri kontrol edin:
 
 - Master, Wi-Fi slave ve BLE slave hatasız derleniyor mu?
 - UI görevi Core 1'de ve 30 Hz zaman çizgisinde kalıyor mu?
 - Ağ/ADC işleri Core 0'da bloklamadan çalışıyor mu?
-- UI ve fiziksel slave'ler aynı planlanmış timestamp'i kullanıyor mu?
+- UI ve fiziksel slave'lerin ilk fazi aynı planlanmış timestamp'i kullanıyor mu?
+- State yalniz semantik degisiklikte veya reconnect sonrasi gonderiliyor mu?
+- ACK yokken 500 ms aralikla en fazla uc deneme yapiliyor mu?
+- Duplicate state slave flash'ini yeniden yazmadan `UNCHANGED` ACK veriyor mu?
 - Global 200 ms duplicate guard korunuyor mu?
 - Gerçek cuff nabız algılayıcısı yanlışlıkla tekrar etkinleştirildi mi?
 - Sentetik nabız yalnızca ayarlanan alt/üst basınç aralığında mı?

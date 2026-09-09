@@ -1,11 +1,30 @@
-# Blood Pressure Wi-Fi + BLE Master — Version 2.1.1
+# State based Trigger BLE Master Software — Version 3.0.0
 
 Waveshare ESP32-S3 Touch AMOLED 1.43 (466×466) için PlatformIO tabanlı tansiyon
 simülatörü/master firmware'i. Ekrandaki kadran, sentetik nabız salınımı, Wi-Fi
 slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 
-> Bu depo `v2.1.1` donanım düzenini hedefler. 1.91 inç veya farklı pin dizilimli
+> Bu depo `v3.0.0` donanım düzenini hedefler. 1.91 inç veya farklı pin dizilimli
 > kartlara doğrudan yüklenmemelidir.
+
+## Version 3.0.0 state trigger
+
+- Master artik her sentetik nabizda ag paketi gondermez. Yalniz BPM veya basinc
+  bolgesi degistiginde state paketi yollar; yeniden baglanan cihaza mevcut state
+  bir kez tekrar iletilir.
+- State paketi alici cihaz ID'si, BPM, `BELOW/INSIDE/ABOVE` basinc bolgesi,
+  opsiyonel gecikme, revision ve ortak baslangic zamanini tasir.
+- ACK gelmezse 500 ms arayla en fazla uc deneme yapilir; degismeyen state icin
+  sonsuz/periyodik trafik olusmaz.
+- Wi-Fi ve BLE slave son state'i NVS flash'ta tutar. Ayni semantik state tekrar
+  gelirse flash yeniden yazilmaz; cihaz yeniden acildiginda saklanan state kullanilir.
+- Basinc bolgesi `INSIDE` iken slave BPM ritmini yerel olarak uretir. `BELOW` ve
+  `ABOVE` durumlarinda cikis kapali kalir. Gelismis slave yazilimi bu uc state'i
+  farkli medya veya donut isleyicilerine baglayabilir.
+- Periyodik saat senkronizasyonu state paketinden ayri kalir.
+
+Paket yerlesimi, tekrar/ACK kurallari ve slave gelistirme notlari
+[docs/STATE_TRIGGER_PROTOCOL_V3.md](docs/STATE_TRIGGER_PROTOCOL_V3.md) dosyasindadir.
 
 ## Version 2.1.1 özellikleri
 

@@ -25,6 +25,7 @@ static uint32_t lastSyncRequestMs = 0;
 static uint32_t lastSyncMs = 0;
 static QueueHandle_t ackQueue = nullptr;
 static QueueHandle_t triggerQueue = nullptr;
+static QueueHandle_t triggerStateQueue = nullptr;
 static QueueHandle_t phoneTriggerQueue = nullptr;
 static TaskHandle_t bleTaskHandle = nullptr;
 static NimBLECharacteristic *phoneStatus = nullptr;
@@ -35,8 +36,17 @@ static volatile uint16_t phoneDiastolicMmHg = 0;
 static volatile bool publishedConnected = false;
 static volatile bool publishedSynced = false;
 static volatile uint32_t publishedRttUs = 0;
+static TriggerStatePacket latestTriggerState{};
+static bool latestTriggerStateValid = false;
+static uint32_t acknowledgedStateRevision = 0;
+static uint32_t pendingStateRevision = 0;
+static uint32_t lastStateSendMs = 0;
+static uint8_t stateSendAttempts = 0;
 
 static constexpr uint8_t BLE_TRIGGER_QUEUE_LENGTH = 16;
+static constexpr uint8_t TRIGGER_STATE_PROTOCOL_VERSION = 3;
+static constexpr uint8_t TRIGGER_STATE_MAX_ATTEMPTS = 3;
+static constexpr uint32_t TRIGGER_STATE_RETRY_MS = 500;
 
 static void publishPhoneText(const char *text) {
     if (!phoneStatus || !text) return;
@@ -195,6 +205,10 @@ class ClientCallbacks : public NimBLEClientCallbacks {
     void onDisconnect(NimBLEClient *, int reason) override {
         connected = false; synced = false; rx = nullptr; tx = nullptr;
         bestRttUs = INT64_MAX;
+        acknowledgedStateRevision = 0;
+        pendingStateRevision = 0;
+        stateSendAttempts = 0;
+        lastStateSendMs = 0;
         Serial.printf("[BLE] %s disconnected, reason=%d\n", BLE_NODE_NAME, reason);
     }
 };
@@ -218,6 +232,27 @@ static void onNotify(NimBLERemoteCharacteristic *characteristic,
         memcpy(&source, data, sizeof(source));
         BleLedAck ack{source.eventId, source.ledOnAtLocalUs - offsetUs};
         if (ackQueue) xQueueSend(ackQueue, &ack, 0);
+        return;
+    }
+    if (data[0] == MSG_TRIGGER_STATE_ACK &&
+        length == sizeof(TriggerStateAck)) {
+        TriggerStateAck ack{};
+        memcpy(&ack, data, sizeof(ack));
+        if (ack.protocolVersion == TRIGGER_STATE_PROTOCOL_VERSION &&
+            ack.deviceId == BLE_NODE_ID &&
+            ack.stateRevision == pendingStateRevision) {
+            if (ack.result == TRIGGER_STATE_APPLIED ||
+                ack.result == TRIGGER_STATE_UNCHANGED) {
+                acknowledgedStateRevision = ack.stateRevision;
+                Serial.printf("[STATE] BLE device %u revision %lu ACK result=%u\n",
+                              BLE_NODE_ID, (unsigned long)ack.stateRevision,
+                              ack.result);
+            } else {
+                Serial.printf("[STATE] BLE device %u revision %lu rejected=%u\n",
+                              BLE_NODE_ID, (unsigned long)ack.stateRevision,
+                              ack.result);
+            }
+        }
         return;
     }
     if (data[0] != MSG_SYNC_RESP || length != sizeof(SyncResponse)) return;
@@ -270,12 +305,17 @@ static void connectPending() {
     }
     connected = true; synced = false; bestRttUs = INT64_MAX; syncSamples = 0;
     lastSyncRequestMs = 0;
+    acknowledgedStateRevision = 0;
+    pendingStateRevision = 0;
+    stateSendAttempts = 0;
+    lastStateSendMs = 0;
     Serial.printf("[BLE] %s connected\n", BLE_NODE_NAME);
 }
 
 void bleMasterBegin() {
     ackQueue = xQueueCreate(16, sizeof(BleLedAck));
     triggerQueue = xQueueCreate(BLE_TRIGGER_QUEUE_LENGTH, sizeof(BleTriggerPacket));
+    triggerStateQueue = xQueueCreate(1, sizeof(TriggerStatePacket));
     phoneTriggerQueue = xQueueCreate(8, sizeof(BlePhoneCommand));
     NimBLEDevice::init("ECG_MASTER_WIFI_BLE");
     NimBLEDevice::setMTU(247);
@@ -308,6 +348,12 @@ void bleMasterTick() {
     NimBLEScan *scan = NimBLEDevice::getScan();
     if (!connected && !pendingDevice && !scan->isScanning()) scan->start(5000, false);
     const uint32_t nowMs = millis();
+    TriggerStatePacket incomingState{};
+    while (triggerStateQueue &&
+           xQueueReceive(triggerStateQueue, &incomingState, 0) == pdTRUE) {
+        latestTriggerState = incomingState;
+        latestTriggerStateValid = true;
+    }
     if (synced && nowMs - lastSyncMs >= BLE_SYNC_TIMEOUT_MS) {
         synced = false; bestRttUs = INT64_MAX; syncSamples = 0;
         Serial.println("[SYNC] BLE timeout");
@@ -319,6 +365,29 @@ void bleMasterTick() {
         lastSyncRequestMs = nowMs;
         SyncRequest request{MSG_SYNC_REQ, pendingRequest, pendingT1};
         rx->writeValue((uint8_t *)&request, sizeof(request), false);
+    }
+
+    const bool isReceiver = latestTriggerStateValid &&
+        (latestTriggerState.receiverDeviceId == 0 ||
+         latestTriggerState.receiverDeviceId == BLE_NODE_ID);
+    if (connected && synced && rx && isReceiver &&
+        acknowledgedStateRevision != latestTriggerState.stateRevision) {
+        if (pendingStateRevision != latestTriggerState.stateRevision) {
+            pendingStateRevision = latestTriggerState.stateRevision;
+            stateSendAttempts = 0;
+            lastStateSendMs = 0;
+        }
+        if (stateSendAttempts < TRIGGER_STATE_MAX_ATTEMPTS &&
+            (lastStateSendMs == 0 ||
+             nowMs - lastStateSendMs >= TRIGGER_STATE_RETRY_MS)) {
+            lastStateSendMs = nowMs;
+            ++stateSendAttempts;
+            if (!rx->writeValue((uint8_t *)&latestTriggerState,
+                                sizeof(latestTriggerState), false)) {
+                Serial.printf("[STATE] BLE revision %lu send failed\n",
+                              (unsigned long)latestTriggerState.stateRevision);
+            }
+        }
     }
 
     BleTriggerPacket packet{};
@@ -348,6 +417,11 @@ bool bleSendTrigger(const TriggerPacket &packet) {
     return xQueueSend(triggerQueue, &out, 0) == pdTRUE;
 }
 
+bool blePublishTriggerState(const TriggerStatePacket &packet) {
+    return triggerStateQueue &&
+           xQueueOverwrite(triggerStateQueue, &packet) == pdTRUE;
+}
+
 bool bleTakeLedAck(BleLedAck &ack) {
     return ackQueue && xQueueReceive(ackQueue, &ack, 0) == pdTRUE;
 }
@@ -371,9 +445,14 @@ void blePublishBpm(uint16_t bpm, uint16_t systolicMmHg,
 
 void blePublishPhoneResult(uint32_t eventId, bool wifiQueued, bool bleQueued) {
     char result[48];
-    snprintf(result, sizeof(result), "OK %lu WIFI=%u BLE=%u",
-             (unsigned long)eventId, wifiQueued ? 1U : 0U,
-             bleQueued ? 1U : 0U);
+    if (!wifiQueued && !bleQueued) {
+        snprintf(result, sizeof(result), "OK %lu LOCAL=1",
+                 (unsigned long)eventId);
+    } else {
+        snprintf(result, sizeof(result), "OK %lu WIFI=%u BLE=%u",
+                 (unsigned long)eventId, wifiQueued ? 1U : 0U,
+                 bleQueued ? 1U : 0U);
+    }
     publishPhoneText(result);
 }
 

@@ -1,4 +1,4 @@
-# Version 2 Protocol Reference
+# Version 3 Protocol Reference
 
 Bu dosya master ile Wi-Fi/BLE slave'ler arasındaki wire sözleşmesidir. Struct
 alanlarının sırası, tipi veya `packed` özelliği tek tarafta değiştirilmemelidir.
@@ -11,9 +11,10 @@ localTargetUs = executeAtMasterUs + clockOffsetUs
 masterActualUs = localActualUs - clockOffsetUs
 ```
 
-Master her tetiklemeyi mevcut Version 2 kodunda ortak ve sabit 600 ms lead ile
-geleceğe planlar. UI darbesi ve iki fiziksel slave aynı `executeAtMasterUs`
-değerini hedefler. Global tekrar koruması 200 ms'dir.
+V3 state-trigger paketi ve ACK davranisinin ayrintili entegrasyon sozlesmesi
+[docs/STATE_TRIGGER_PROTOCOL_V3.md](docs/STATE_TRIGGER_PROTOCOL_V3.md) dosyasindadir.
+Master ilk fazi ortak ve sabit 600 ms lead ile gelecege planlar. Slave'ler bu
+fazdan sonra BPM ritmini yerel uretir. UI tekrar korumasi 200 ms'dir.
 
 ## Mesaj tipleri
 
@@ -26,6 +27,8 @@ değerini hedefler. Global tekrar koruması 200 ms'dir.
 | 5 | `MSG_LED_ON_ACK` |
 | 6 | `MSG_HELLO` (Wi-Fi) |
 | 7 | `MSG_DEVICE_STATUS` (Wi-Fi) |
+| 8 | `MSG_TRIGGER_STATE` |
+| 9 | `MSG_TRIGGER_STATE_ACK` |
 
 ## Packed boyutlar
 
@@ -40,6 +43,8 @@ değerini hedefler. Global tekrar koruması 200 ms'dir.
 | `DeviceStatusPacket` | 11 |
 | BLE `BleTriggerPacket` | 18 |
 | BLE `BleLedOnAck` | 13 |
+| `TriggerStatePacket` | 21 |
+| `TriggerStateAck` | 9 |
 
 Wi-Fi paketi `targetMask` içerir. BLE slave'in eski ve daha küçük wire formatı
 bu alanı içermez; master hedef filtresini `bleSendTrigger()` içinde yapar.

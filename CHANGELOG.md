@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 3.0.0 - 2026-09-09
+
+- Per-beat Wi-Fi/BLE trigger paketlerini, alici ID + BPM + basinc bolgesi +
+  opsiyonel gecikme iceren retained state protokoluyle degistirir.
+- State'i yalnizca icerigi degistiginde veya slave yeniden baglandiginda yollar;
+  ACK beklerken 500 ms aralikla en fazla uc deneme yapar.
+- Wi-Fi ve BLE slave'lerde state'i semantik degisiklikte NVS'ye kaydeder,
+  duplicate pakette flash yazimini atlar ve reboot sonrasinda yerel BPM uretimini
+  saklanan state ile surdurur.
+- `BELOW`, `INSIDE`, `ABOVE` basinc bolgelerini protokol sozlesmesine ekler;
+  mevcut basit LED slave'ler yalnizca `INSIDE` bolgesinde cikis uretir.
+- Periyodik saat senkronizasyonunu state tasimasindan ayri tutar ve ilk yerel
+  cikisi master'in ortak effective timestamp'ine sabitler.
+
 - PC üzerinden `BP_TRIGGER_MASTER` cihazına Wi-Fi gerektirmeden firmware gönderen
   ayrı bir BLE OTA GATT servisi ve Bleak tabanlı yükleme aracı ekler.
 - Parça sırası/offset ACK'i, tam görüntü CRC32 kontrolü ve ESP OTA imaj doğrulaması

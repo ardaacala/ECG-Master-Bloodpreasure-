@@ -7,6 +7,7 @@ void wifiMasterTick();
 void wifiMasterPublishUi();
 bool wifiSystemReady();
 bool wifiSendTrigger(const TriggerPacket &packet);
+bool wifiPublishTriggerState(const TriggerStatePacket &packet);
 uint32_t wifiRecommendedLeadUs();
 
 struct WifiNodeStatus {
