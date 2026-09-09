@@ -19,6 +19,8 @@ slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 - Açık/koyu tema ve 2 saniye basılı tutarak ekran açma/kapatma.
 - Filtreli batarya voltajı ve lookup-table tabanlı yüzde göstergesi.
 
+- QMI8658 hareket algılamasıyla 5 dakika hareketsizlikte otomatik düşük güç bekleme.
+
 ## Donanım ve pinler
 
 | İşlev | Pin / bilgi |
@@ -36,8 +38,25 @@ Aktif topoloji:
 - Wi-Fi slave: mantıksal ID 1, varsayılan GPIO2 active-high.
 - BLE slave: mantıksal ID 2, reklam adı `LED_NODE_1`, GPIO4 active-low.
 
-GPIO47/48 QMI8658 ile ortak kart içi I²C hattıdır. Firmware yalnızca dokunmatik
-denetleyiciye erişir; IMU pinleri veya kayıtları değiştirilmez.
+GPIO47/48, dokunmatik ve QMI8658 tarafından paylaşılan kart içi I²C hattıdır.
+QMI8658'in kartta bağlı `INT1` çıkışı GPIO8'e gider.
+
+## Harekete duyarlı bekleme modu
+
+QMI8658, normal çalışmada fiziksel hareketi 10 Hz düşük güçlü ivme örnekleriyle
+izler; ekran dokunuşu da kullanıcı aktivitesi sayılır. Her fiziksel hareket veya
+dokunma beş dakikalık sayacı baştan başlatır. Son aktiviteden itibaren beş dakika
+geçerse yeni tetikler engellenir,
+ekran uyutulur ve ESP32-S3 deep sleep'e girer; bu durumda iki CPU çekirdeği ile
+Wi-Fi/BLE radyo alanları kapalıdır. Yalnızca QMI8658'in 21 Hz düşük güç
+ivmeölçeri çalışır. Hareket, QMI8658 `INT1` -> GPIO8 hattıyla kartı uyandırır
+ve normal çalışma yeniden başlar. BLE'den girilen BPM/basınç aralığı ve tema
+RTC belleğinde tutulduğu için bu uyanmada kaybolmaz.
+
+Jiroskop, QMI8658'in düşük güç ivmeölçer modunda donanım gereği kapalıdır.
+Bu, aynı hareketle uyanma işlevini daha az batarya tüketimiyle sağlar. IMU
+başlatılamazsa cihazın uyanamayacağı bir duruma girmemesi için otomatik bekleme
+devre dışı kalır.
 
 ## BLE telefon kontrolü
 
@@ -101,11 +120,36 @@ olarak görünen slave portlarına master firmware'i yüklemeyin. Port görünm�
 
 ## Batarya ölçümü
 
-GPIO4, kart üzerindeki BAT_ADC direnç bölücüsünü okur. Her 5 saniyede 32 örnek
-ortalaması alınır, ×3 bölücü katsayısı uygulanır ve düşük geçiren filtre
-kullanılır. Yüzde doğrusal `map()` ile değil, 3.20–4.20 V Li-Po eğrisi üzerinde
+GPIO4, kart üzerindeki BAT_ADC direnç bölücüsünü okur. Her ölçüm grubu için 32
+örnek 20 ms aralıklarla alınır; böylece basınç sensörü tek seferde bloke edilmez.
+×3 bölücü katsayısı ve düşük geçiren filtre uygulanır. Yüzde doğrusal `map()`
+ile değil, 3.20–4.20 V Li-Po eğrisi üzerinde
 lookup table + interpolasyonla hesaplanır. USB/şarj sırasında değer doğal olarak
 şarj devresinden etkilenebilir.
+
+### Feature: Battery level while charging fix
+
+`feature/battery-level-while-charging-fix` dalında BAT_ADC voltajındaki ani
+yukarı sıçrama doğrudan yüzde artışı kabul edilmez. Kart şemasındaki ETA6098
+`ISET` direnci 82 kΩ'dur ve şarj akımını 500 mA'e ayarlar. Yazılım, kablo
+takılmadan önceki lookup-table SOC değerini korur; yükseliş üç ardışık ölçümle
+doğrulanınca 1500 mAh kapasite, %98 hücre coulombic verimi ve CC/CV son-dolum
+yavaşlamasıyla SOC'yi zaman üzerinden ilerletir. Böylece şarj sırasında görülen
+4.20 V, gerçek batarya hemen dolmuş gibi yorumlanmaz. USB çıkarıldığında 70 mV veya daha büyük
+düşüş hızlı uygulanır ve tekrar batarya-only voltaj eğrisine dönülür. Tahmini
+şarj durumu aktifken batarya yüzdesinin yanında `CHG` gösterilir.
+
+Modeldeki `BATTERY_CAPACITY_MAH`, `BATTERY_CHARGE_CURRENT_MA` ve
+`BATTERY_CHARGE_COULOMBIC_EFFICIENCY` sabitleri farklı pil veya ölçülmüş şarj süresine göre
+kalibre edilebilir. Yeni/sağlıklı 1500 mAh pil varsayımı kullanılır; yaşlanma,
+sıcaklık ve gerçek kapasite nedeniyle bu yöntem fuel-gauge entegresi kadar kesin
+değildir, fakat şarj gerilimini doğrudan yüzdeye çevirmekten belirgin biçimde
+daha gerçekçidir.
+
+Kartın ETA6098 `STAT` çıkışı ESP32 GPIO'suna bağlı olmadığı için yazılım yalnızca
+BAT_ADC ile şarj kablosunu kesin olarak algılayamaz. Sistem USB zaten takılıyken
+soğuk açılırsa geçmiş bir batarya-only referansı yoktur; bu donanım sınırlaması
+ayrı bir VBUS/STAT bağlantısı olmadan tamamen çözülemez.
 
 ## Proje yapısı
 
