@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Battery level while charging fix
+## 2.1.0 - 2026-09-09
 
 - BAT_ADC kaynaklı ani şarj voltajı sıçramasının yüzdeyi hemen 100'e taşımasını engeller.
 - Şemadaki 82 kΩ ISET / 500 mA şarj akımıyla 1500 mAh batarya için zaman tabanlı

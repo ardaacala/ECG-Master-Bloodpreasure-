@@ -1,17 +1,17 @@
-# Blood Pressure Wi-Fi + BLE Master — Version 2
+# Blood Pressure Wi-Fi + BLE Master — Version 2.1
 
 Waveshare ESP32-S3 Touch AMOLED 1.43 (466×466) için PlatformIO tabanlı tansiyon
 simülatörü/master firmware'i. Ekrandaki kadran, sentetik nabız salınımı, Wi-Fi
 slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 
-> Bu depo `v2.0.0` donanım düzenini hedefler. 1.91 inç veya farklı pin dizilimli
+> Bu depo `v2.1.0` donanım düzenini hedefler. 1.91 inç veya farklı pin dizilimli
 > kartlara doğrudan yüklenmemelidir.
 
-## Version 2 özellikleri
+## Version 2.1 özellikleri
 
 - 30 Hz AMOLED arayüzü; UI görevi Core 1'de, radyo ve ADC işleri Core 0'da.
 - Gerçek nabız araması kapalı; yalnızca ayarlanabilir sentetik BPM kullanılır.
-- Sentetik salınım tepe değeri `0.6 mmHg`; fiziksel LED ve UI LED'iyle aynı anda başlar.
+- Sentetik salınım tepe değeri `1.5 mmHg`; fiziksel LED ve UI LED'iyle aynı anda başlar.
 - BPM aralığı 30–240, tekrar tetikleme koruması 200 ms.
 - Sentetik nabız yalnızca diyastolik ve sistolik basınç sınırları arasında çalışır.
 - Wi-Fi ve BLE slave'lere ortak, ileri tarihli tetikleme zamanı gönderilir.
@@ -19,7 +19,6 @@ slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 - Açık/koyu tema ve 2 saniye basılı tutarak ekran açma/kapatma.
 - Filtreli batarya voltajı ve lookup-table tabanlı yüzde göstergesi.
 - Parola korumalı Wi-Fi OTA firmware yükleme desteği.
-
 - QMI8658 hareket algılamasıyla 5 dakika hareketsizlikte otomatik düşük güç bekleme.
 
 ## Donanım ve pinler
@@ -151,7 +150,7 @@ lookup table + interpolasyonla hesaplanır. USB/şarj sırasında değer doğal 
 
 ### Feature: Battery level while charging fix
 
-`feature/battery-level-while-charging-fix` dalında BAT_ADC voltajındaki ani
+`v2.1.0` sürümünde BAT_ADC voltajındaki ani
 yukarı sıçrama doğrudan yüzde artışı kabul edilmez. Kart şemasındaki ETA6098
 `ISET` direnci 82 kΩ'dur ve şarj akımını 500 mA'e ayarlar. Yazılım, kablo
 takılmadan önceki lookup-table SOC değerini korur; yükseliş üç ardışık ölçümle
