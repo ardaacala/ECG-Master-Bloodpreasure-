@@ -11,6 +11,7 @@
 #include "protocol.h"
 #include "wifi_master.h"
 #include "ble_master.h"
+#include "ota_service.h"
 
 // The active 466x466 round Waveshare board routes its onboard BAT_ADC divider
 // to GPIO4. The external conditioned pressure sensor remains on GPIO2.
@@ -404,7 +405,7 @@ bool sendPulseTrigger(PulseType pulseType = PULSE_LARGE,
                       uint64_t targetMask = 0,
                       int64_t *executeAtResultUs = nullptr,
                       uint32_t *eventIdResult = nullptr) {
-    if (standbyEntering) return false;
+    if (standbyEntering || otaServiceInProgress()) return false;
     const int64_t executeAtUs = esp_timer_get_time() +
                                 FIXED_TRIGGER_LEAD_US;
     uint32_t eventId = 0;
@@ -1063,6 +1064,16 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
         displayedBeatAtUs = 0;
     };
 
+    if (otaServiceInProgress()) {
+        rangeActive = false;
+        nextBeatMs = 0;
+        outOfRangeSinceMs = 0;
+        clearScheduledDisplay();
+        fakePulseMode = false;
+        fakePressureOffset = 0.0f;
+        return;
+    }
+
     if (appliedBpmRevision != fakeBpmRevision) {
         appliedBpmRevision = fakeBpmRevision;
         nextBeatMs = 0;
@@ -1604,6 +1615,7 @@ void setup() {
                   touchAvailable ? "ready" : "not found");
     imuMotionWakeAvailable = initializeMotionWake();
     wifiMasterBegin();
+    otaServiceBegin();
     bleMasterBegin();
     blePublishBpm(fakeBpm, fakeMaxPressureMmHg, fakeMinPressureMmHg);
     Serial.printf("[SENSOR] analog GPIO%u, nominal 0.2-%.3f V -> 0-%.2f mmHg\n",
@@ -1620,6 +1632,7 @@ void setup() {
 }
 
 void loop() {
+    otaServiceHandle();
     updateMotionActivity();
     updateTouchGesture();
     BlePhoneCommand phoneCommand{};
@@ -1651,6 +1664,7 @@ void loop() {
     }
     const uint32_t now = millis();
     if (imuMotionWakeAvailable && !standbyEntering &&
+        !otaServiceInProgress() &&
         now - lastMotionActivityMs >= STANDBY_TIMEOUT_MS) {
         enterMotionStandby();
     }
