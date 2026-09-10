@@ -29,6 +29,7 @@ static QueueHandle_t triggerStateQueue = nullptr;
 static QueueHandle_t phoneTriggerQueue = nullptr;
 static TaskHandle_t bleTaskHandle = nullptr;
 static NimBLECharacteristic *phoneStatus = nullptr;
+static NimBLECharacteristic *batteryLevelCharacteristic = nullptr;
 static volatile bool phoneConnected = false;
 static volatile uint16_t phoneBpm = 0;
 static volatile uint16_t phoneSystolicMmHg = 0;
@@ -36,6 +37,9 @@ static volatile uint16_t phoneDiastolicMmHg = 0;
 static volatile bool publishedConnected = false;
 static volatile bool publishedSynced = false;
 static volatile uint32_t publishedRttUs = 0;
+static volatile uint8_t publishedBatteryLevel = 0;
+static volatile bool publishedBatteryValid = false;
+static volatile uint32_t batteryLevelRevision = 0;
 static TriggerStatePacket latestTriggerState{};
 static bool latestTriggerStateValid = false;
 static uint32_t acknowledgedStateRevision = 0;
@@ -190,6 +194,17 @@ static void beginPhoneControlService() {
         CONTROL_TX_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     command->setCallbacks(&phoneCommandCallbacks);
     phoneStatus->setValue("WRITE BPM OR BPM,SYS,DIA");
+    NimBLEService *batteryService = server->createService(
+        NimBLEUUID((uint16_t)0x180F));
+    if (batteryService) {
+        batteryLevelCharacteristic = batteryService->createCharacteristic(
+            NimBLEUUID((uint16_t)0x2A19),
+            NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+        const uint8_t initialBatteryLevel = 0;
+        batteryLevelCharacteristic->setValue(&initialBatteryLevel, 1);
+    } else {
+        Serial.println("[BLE PHONE] battery service could not be created");
+    }
     if (!bleOtaServiceBegin(server)) {
         Serial.println("[BLE OTA] service initialization failed");
     }
@@ -353,6 +368,17 @@ void bleMasterTick() {
     NimBLEScan *scan = NimBLEDevice::getScan();
     if (!connected && !pendingDevice && !scan->isScanning()) scan->start(5000, false);
     const uint32_t nowMs = millis();
+    static uint32_t appliedBatteryLevelRevision = UINT32_MAX;
+    const uint32_t requestedBatteryRevision = batteryLevelRevision;
+    if (batteryLevelCharacteristic &&
+        requestedBatteryRevision != appliedBatteryLevelRevision) {
+        appliedBatteryLevelRevision = requestedBatteryRevision;
+        const uint8_t level = publishedBatteryValid
+                                  ? publishedBatteryLevel
+                                  : 0;
+        batteryLevelCharacteristic->setValue(&level, 1);
+        if (phoneConnected) batteryLevelCharacteristic->notify();
+    }
     TriggerStatePacket incomingState{};
     while (triggerStateQueue &&
            xQueueReceive(triggerStateQueue, &incomingState, 0) == pdTRUE) {
@@ -449,6 +475,16 @@ void blePublishBpm(uint16_t bpm, uint16_t systolicMmHg,
              (unsigned)bpm, (unsigned)systolicMmHg,
              (unsigned)diastolicMmHg);
     publishPhoneText(result);
+}
+
+void blePublishBatteryLevel(uint8_t percent, bool valid) {
+    percent = min<uint8_t>(percent, 100);
+    if (publishedBatteryLevel == percent && publishedBatteryValid == valid) {
+        return;
+    }
+    publishedBatteryLevel = percent;
+    publishedBatteryValid = valid;
+    batteryLevelRevision = batteryLevelRevision + 1;
 }
 
 void blePublishPhoneResult(uint32_t eventId, bool wifiQueued, bool bleQueued) {

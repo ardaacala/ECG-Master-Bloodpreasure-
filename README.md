@@ -24,6 +24,8 @@ slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
   `ABOVE` durumlarinda cikis kapali kalir. Gelismis slave yazilimi bu uc state'i
   farkli medya veya donut isleyicilerine baglayabilir.
 - Periyodik saat senkronizasyonu state paketinden ayri kalir.
+- Tek bir senkron alici yeterlidir: Wi-Fi ve BLE state teslimati birbirinden
+  bagimsizdir; diger transport veya ikinci bir slave baglantisi beklenmez.
 
 Paket yerlesimi, tekrar/ACK kurallari ve slave gelistirme notlari
 [docs/STATE_TRIGGER_PROTOCOL_V3.md](docs/STATE_TRIGGER_PROTOCOL_V3.md) dosyasindadir.
@@ -31,6 +33,18 @@ Paket yerlesimi, tekrar/ACK kurallari ve slave gelistirme notlari
 ## Version 2.1.1 özellikleri
 
 - 30 Hz AMOLED arayüzü; UI görevi Core 1'de, radyo ve ADC işleri Core 0'da.
+- UI her karede tek bir tamamlanmış 466x466 framebuffer aktarır; ibre, LED,
+  bağlantı ve batarya katmanları arasında kirli-dikdörtgen çakışması oluşmaz.
+- Tam-kare QSPI aktarımı 8192 piksellik bloklarla yapılır. Framebuffer RGB565
+  byte sırası tek geçişte hazırlanıp panele doğrudan gönderilir; sürücünün her
+  blokta ikinci kez kopyalayıp dönüştürmesi önlenir.
+- Arayüz panel montajına uygun olarak 90° saat yönünün tersine döndürülür;
+  dokunmatik koordinatları da aynı görünür yöne çevrilir.
+- Ayrıntılı kadranda 2,5 mmHg alt çizgiler ve küçük vektör rakamlarla
+  `0, 20, 40...300` etiketleri bulunur; `10, 30, 50...` ara onlukları belirgin
+  fakat kısa tiklerle ayrılır ve rakamlarla arasında boşluk bırakılır. Kadran ekranın kırpılmadan desteklediği maksimum yarıçapı
+  kullanır. İbre bütün dinamik UI katmanlarının üzerinde çizilir. SimClever logosu üst-ortada,
+  Wi-Fi/BLE durumu merkez altında ve büyük batarya göstergesi alt kenardadır.
 - Gerçek nabız araması kapalı; yalnızca ayarlanabilir sentetik BPM kullanılır.
 - Sentetik salınım tepe değeri `1.5 mmHg`; fiziksel LED ve UI LED'iyle aynı anda başlar.
 - BPM aralığı 30–240, tekrar tetikleme koruması 200 ms.
@@ -60,7 +74,11 @@ Paket yerlesimi, tekrar/ACK kurallari ve slave gelistirme notlari
 Aktif topoloji:
 
 - Wi-Fi slave: mantıksal ID 1, varsayılan GPIO2 active-high.
-- BLE slave: mantıksal ID 2, reklam adı `LED_NODE_1`, GPIO4 active-low.
+- BLE slave: mantıksal ID 2, reklam adı `RTCOUND20180`, GPIO4 active-low.
+
+Master BLE tarafinda ayni anda tek fiziksel slave baglantisi kullanir ve bu
+baglanti trigger state almak icin tek basina yeterlidir. Reklam adinin
+`RTCOUND20180` ile birebir eslesmesi gerekir.
 
 GPIO47/48, dokunmatik ve QMI8658 tarafından paylaşılan kart içi I²C hattıdır.
 QMI8658'in kartta bağlı `INT1` çıkışı GPIO8'e gider.
@@ -96,6 +114,11 @@ Sınırlar: BPM 30–240, sistolik 31–300, diyastolik 1–sistolik-1.
 UUID'ler [include/protocol.h](include/protocol.h) içindedir. Çalışma sırasında
 gelen BLE ayarları bilerek yalnızca RAM'de tutulur; flash yazısının UI'ı
 dondurması önlenir.
+
+Master batarya yüzdesi ayrıca standart BLE Battery Service `0x180F` içindeki
+Battery Level `0x2A19` karakteristiğinden tek bayt `0..100` olarak okunabilir.
+Yüzde değiştiğinde aynı karakteristik notification da gönderir; ilk geçerli
+BAT_ADC ölçümü tamamlanmadan önce değer `0` olur.
 
 ## Kurulum ve derleme
 

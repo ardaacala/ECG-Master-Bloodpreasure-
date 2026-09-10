@@ -11,7 +11,9 @@
 #endif
 #define WIFI_TCP_PORT 3333
 #define MAX_WIFI_CLIENTS 8
-#define MIN_READY_NODES 2
+// Tek bir senkron alici sistemi hazir saymak icin yeterlidir. Wi-Fi ve BLE
+// state teslimati birbirinden bagimsizdir; biri digerini beklemez.
+#define MIN_READY_NODES 1
 
 // OTA runs on the master's existing access point. By default it reuses the
 // ignored local AP password; define OTA_PASSWORD separately in secrets.h if
@@ -28,7 +30,7 @@
 // Karma sistem: bir slave Wi-Fi, GPIO4 active-low slave BLE'dir.
 #define WIFI_NODE_ID 1
 #define BLE_NODE_ID 2
-#define BLE_NODE_NAME "LED_NODE_1"
+#define BLE_NODE_NAME "RTCOUND20180"
 
 #define SYSTOLIC 120
 #define DIASTOLIC 80
