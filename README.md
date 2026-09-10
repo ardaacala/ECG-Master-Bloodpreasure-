@@ -35,6 +35,9 @@ Paket yerlesimi, tekrar/ACK kurallari ve slave gelistirme notlari
 - 30 Hz AMOLED arayüzü; UI görevi Core 1'de, radyo ve ADC işleri Core 0'da.
 - UI her karede tek bir tamamlanmış 466x466 framebuffer aktarır; ibre, LED,
   bağlantı ve batarya katmanları arasında kirli-dikdörtgen çakışması oluşmaz.
+- Tam-kare QSPI aktarımı 8192 piksellik bloklarla yapılır. Framebuffer RGB565
+  byte sırası tek geçişte hazırlanıp panele doğrudan gönderilir; sürücünün her
+  blokta ikinci kez kopyalayıp dönüştürmesi önlenir.
 - Arayüz panel montajına uygun olarak 90° saat yönünün tersine döndürülür;
   dokunmatik koordinatları da aynı görünür yöne çevrilir.
 - Ayrıntılı kadranda 2,5 mmHg alt çizgiler ve küçük vektör rakamlarla

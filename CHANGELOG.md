@@ -5,6 +5,9 @@
 - CO5300 uzerinde ibre, LED, baglanti ve batarya katmanlarinin cakismasinda
   gorulen dikdortgen/hayalet izlerini onlemek icin dirty-region aktarimini
   kaldirir; 30 Hz UI her kareyi tek tamamlanmis framebuffer olarak gonderir.
+- Tam ekran QSPI aktarim blogunu 1024 pikselden 8192 piksele cikarir ve RGB565
+  byte sirasini framebuffer uzerinde tek geciste hazirlayarak ikinci surucu
+  kopyasini kaldirir; olculen tam-kare UI hizi 13 FPS'den 14-15 FPS'ye cikar.
 - Fiziksel BLE slave reklam filtresini gercek cihaz adi `RTCOUND20180` ile
   eslestirir; master ve `slave2_ble` varsayilanlari birlikte guncellenir.
 - Tek bir senkron alicinin yeterli oldugunu netlestirir ve eski Wi-Fi hazirlik

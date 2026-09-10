@@ -612,11 +612,28 @@ void drawSimCleverLogo(Arduino_GFX *gfx) {
 
 void flushFullUiFrame() {
     if (!display || !canvas) return;
-    // Canvas rotation has already put every logical pixel in panel order.
-    // One complete transaction prevents partial regions from fighting over
-    // intersecting pixels on the CO5300.
-    display->draw16bitRGBBitmap(
-        0, 0, canvas->getFramebuffer(), SCREEN_W, SCREEN_H);
+    uint16_t *pixels = canvas->getFramebuffer();
+    constexpr size_t pixelCount = (size_t)SCREEN_W * SCREEN_H;
+
+    // The bulk byte path sends bytes as supplied, whereas Arduino_Canvas stores
+    // native little-endian RGB565. Swap two pixels per iteration. The canvas
+    // is restored from backgroundPixels before the next frame, so a reverse
+    // pass is unnecessary.
+    uint32_t *pairs = reinterpret_cast<uint32_t *>(pixels);
+    constexpr size_t pairCount = pixelCount / 2;
+    for (size_t i = 0; i < pairCount; ++i) {
+        const uint32_t value = pairs[i];
+        pairs[i] = ((value & 0x00FF00FFUL) << 8) |
+                   ((value & 0xFF00FF00UL) >> 8);
+    }
+    if (pixelCount & 1U) {
+        pixels[pixelCount - 1] = __builtin_bswap16(pixels[pixelCount - 1]);
+    }
+
+    // Send the pre-swapped framebuffer directly instead of making the QSPI
+    // driver copy and swap every chunk a second time.
+    display->draw16bitBeRGBBitmap(
+        0, 0, pixels, SCREEN_W, SCREEN_H);
 }
 
 void drawStaticGauge() {
@@ -1066,8 +1083,8 @@ bool beginUi() {
     if (!backgroundPixels) return false;
 
     drawStaticGauge();
-    flushFullUiFrame();
     memcpy(backgroundPixels, canvas->getFramebuffer(), frameBytes);
+    flushFullUiFrame();
     return true;
 }
 
