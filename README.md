@@ -1,13 +1,24 @@
-# State based Trigger BLE Master Software — Version 3.0.0
+# State based Trigger BLE Master Software — Version 4.0.0
 
 Waveshare ESP32-S3 Touch AMOLED 1.43 (466×466) için PlatformIO tabanlı tansiyon
 simülatörü/master firmware'i. Ekrandaki kadran, sentetik nabız salınımı, Wi-Fi
 slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 
-> Bu depo `v3.0.0` donanım düzenini hedefler. 1.91 inç veya farklı pin dizilimli
+> Bu depo `v4.0.0` donanım düzenini hedefler. 1.91 inç veya farklı pin dizilimli
 > kartlara doğrudan yüklenmemelidir.
 
-## Version 3.0.0 state trigger
+## Version 4.0.0 tam ekran UI
+
+- İbre, bağlantı durumu, LED ve batarya göstergesi her karede tek framebuffer
+  içinde birleştirilir; üst üste gelen dinamik elemanların bıraktığı dikdörtgen
+  ve hayalet izler önlenir.
+- 466×466 RGB565 framebuffer panele doğrudan aktarılır. 8192 piksellik QSPI
+  blokları ve tek geçişli byte sıralamasıyla ölçülen tam-ekran hızı yaklaşık
+  13 FPS'den 14–15 FPS'ye çıkarılmıştır.
+- Değişiklik yalnızca master ekran aktarım yolundadır; Version 3 state trigger
+  paket sözleşmesi ve slave davranışı korunur.
+
+## Version 3 state trigger protokolü
 
 - Master artik her sentetik nabizda ag paketi gondermez. BPM veya basinc bolgesi
   degistiginde ve slave yeniden baglandiginda state paketini hemen yollar.
@@ -30,7 +41,7 @@ slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 Paket yerlesimi, tekrar/ACK kurallari ve slave gelistirme notlari
 [docs/STATE_TRIGGER_PROTOCOL_V3.md](docs/STATE_TRIGGER_PROTOCOL_V3.md) dosyasindadir.
 
-## Version 2.1.1 özellikleri
+## Temel özellikler
 
 - 30 Hz AMOLED arayüzü; UI görevi Core 1'de, radyo ve ADC işleri Core 0'da.
 - UI her karede tek bir tamamlanmış 466x466 framebuffer aktarır; ibre, LED,
@@ -79,6 +90,30 @@ Aktif topoloji:
 Master BLE tarafinda ayni anda tek fiziksel slave baglantisi kullanir ve bu
 baglanti trigger state almak icin tek basina yeterlidir. Reklam adinin
 `RTCOUND20180` ile birebir eslesmesi gerekir.
+
+### Bağlanacak BLE cihazının adını ayarlama
+
+Master'ın bağlanacağı fiziksel slave'in BLE reklam adı
+[`include/config.h`](include/config.h) içindeki `BLE_NODE_NAME` değeridir:
+
+```cpp
+#define BLE_NODE_NAME "RTCOUND20180"
+```
+
+Başka bir BLE slave kullanılacaksa tırnak içindeki değer, o cihazın yayınladığı
+BLE adına birebir değiştirilmelidir; büyük/küçük harf ve boşluklar önemlidir.
+Bu depodaki BLE slave de kullanılacaksa onun
+[`slave2_ble/include/config.h`](slave2_ble/include/config.h) dosyasındaki
+`NODE_NAME` aynı değer olmalıdır:
+
+```cpp
+#define NODE_NAME "RTCOUND20180"
+```
+
+İsim değişikliğinden sonra master ve adı değiştirilen slave yeniden derlenip
+kendi kartlarına yüklenmelidir. Master yalnızca `BLE_NODE_NAME` ile eşleşen tek
+fiziksel slave'e bağlanır; telefon kontrol uygulamasının gördüğü master reklam
+adı ise bundan bağımsız olarak `BP_TRIGGER_MASTER` kalır.
 
 GPIO47/48, dokunmatik ve QMI8658 tarafından paylaşılan kart içi I²C hattıdır.
 QMI8658'in kartta bağlı `INT1` çıkışı GPIO8'e gider.

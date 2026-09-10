@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.0.0 - 2026-09-10
+
 - CO5300 uzerinde ibre, LED, baglanti ve batarya katmanlarinin cakismasinda
   gorulen dikdortgen/hayalet izlerini onlemek icin dirty-region aktarimini
   kaldirir; 30 Hz UI her kareyi tek tamamlanmis framebuffer olarak gonderir.

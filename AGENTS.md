@@ -1,7 +1,8 @@
 # Repository instructions for coding agents
 
 This is hardware firmware, not a generic ESP32 sample. Preserve the verified
-Version 3 behavior unless the user explicitly requests a hardware migration.
+Version 4 behavior and Version 3 transport contract unless the user explicitly
+requests a hardware migration.
 
 ## Required workflow
 
