@@ -141,6 +141,10 @@ constexpr int32_t IMU_ACTIVITY_DELTA_LSB = 180;
 constexpr uint32_t STANDBY_TIMEOUT_MS = 5UL * 60UL * 1000UL;
 constexpr uint32_t STANDBY_SETTINGS_MAGIC = 0x42505332;
 constexpr int16_t SCREEN_W = 466, SCREEN_H = 466;
+// CO5300 cannot exchange X/Y axes in hardware. Arduino_Canvas writes logical
+// UI coordinates into an already counter-clockwise rotated framebuffer.
+constexpr uint8_t DISPLAY_ROTATION = 0;
+constexpr uint8_t CANVAS_ROTATION = 3;
 
 struct StandbyRetainedSettings {
     uint32_t magic;
@@ -156,7 +160,6 @@ Arduino_DataBus *bus = nullptr;
 Arduino_GFX *display = nullptr;
 Arduino_Canvas *canvas = nullptr;
 uint16_t *backgroundPixels = nullptr;
-uint16_t *dirtyPixels = nullptr;
 int64_t zeroRawSum = 0;
 int64_t zeroMilliVoltsSum = 0;
 int32_t zeroRaw = 0;
@@ -197,7 +200,6 @@ uint8_t qmi8658Address = 0;
 uint32_t lastMotionActivityMs = 0;
 volatile bool standbyEntering = false;
 uint32_t lastSerialMs = 0;
-float lastNeedlePressure = -1.0f;
 uint32_t networkEventId = 0;
 int64_t lastTriggerExecuteAtUs = 0;
 portMUX_TYPE triggerMux = portMUX_INITIALIZER_UNLOCKED;
@@ -402,6 +404,7 @@ void updateBatteryMeasurement() {
     // A disconnected divider is near zero. USB/charging may make the voltage
     // rise; percentage remains clamped by the lookup-table endpoints.
     batteryReadingValid = publishedMv >= 2500;
+    blePublishBatteryLevel(batteryPercent, batteryReadingValid);
     previousMeasuredBatteryMv = measuredMv;
     previousUpdateMs = nowMs;
 }
@@ -480,10 +483,20 @@ void updateTriggerState(float pressureMmHg, bool saturated) {
 
 constexpr int16_t GAUGE_CX = SCREEN_W / 2;
 constexpr int16_t GAUGE_CY = SCREEN_H / 2;
-constexpr int16_t NEEDLE_RADIUS = 158;
+constexpr int16_t NEEDLE_RADIUS = 172;
 constexpr int16_t PULSE_LED_CX = GAUGE_CX;
-constexpr int16_t PULSE_LED_CY = 414;
-constexpr int16_t PULSE_LED_RADIUS = 16;
+constexpr int16_t PULSE_LED_CY = 370;
+constexpr int16_t PULSE_LED_RADIUS = 14;
+constexpr int16_t STATUS_X = 138;
+constexpr int16_t STATUS_Y = 286;
+constexpr int16_t STATUS_W = 190;
+constexpr int16_t STATUS_H = 24;
+constexpr int16_t BATTERY_X = 151;
+// The UI is rotated during panel transfer. Y=404 maps the battery to the
+// visible edge while keeping all four corners inside the round AMOLED area.
+constexpr int16_t BATTERY_Y = 404;
+constexpr int16_t BATTERY_W = 164;
+constexpr int16_t BATTERY_H = 27;
 
 void pointOnGauge(float pressure, int16_t radius, int16_t &x, int16_t &y) {
     pressure = constrain(pressure, 0.0f, GAUGE_MAX_MMHG);
@@ -506,12 +519,21 @@ void drawThickLine(Arduino_GFX *gfx, int16_t x0, int16_t y0,
 }
 
 void drawPulseLed(Arduino_GFX *gfx, bool on) {
+    constexpr int16_t regionMargin = PULSE_LED_RADIUS + 4;
+    const uint16_t face = gfx->color565(darkTheme ? 5 : 244,
+                                        darkTheme ? 7 : 240,
+                                        darkTheme ? 9 : 230);
     const uint16_t bezel = gfx->color565(24, 24, 24);
     const uint16_t rim = gfx->color565(92, 92, 92);
     const uint16_t offColor = gfx->color565(58, 8, 10);
     const uint16_t onColor = gfx->color565(255, 24, 36);
     const uint16_t highlight = gfx->color565(255, 178, 178);
 
+    // Clear the complete dirty rectangle first. Circle-only repainting left
+    // stale corner pixels after a rotated needle update and looked like drift.
+    gfx->fillRect(PULSE_LED_CX - regionMargin,
+                  PULSE_LED_CY - regionMargin,
+                  regionMargin * 2 + 1, regionMargin * 2 + 1, face);
     gfx->fillCircle(PULSE_LED_CX, PULSE_LED_CY, PULSE_LED_RADIUS + 4, bezel);
     gfx->fillCircle(PULSE_LED_CX, PULSE_LED_CY, PULSE_LED_RADIUS + 1, rim);
     gfx->fillCircle(PULSE_LED_CX, PULSE_LED_CY, PULSE_LED_RADIUS,
@@ -519,6 +541,82 @@ void drawPulseLed(Arduino_GFX *gfx, bool on) {
     if (on) {
         gfx->fillCircle(PULSE_LED_CX - 5, PULSE_LED_CY - 5, 4, highlight);
     }
+}
+
+void drawNeedleLayer(Arduino_GFX *gfx, int16_t tipX, int16_t tipY) {
+    const uint16_t needleRed = gfx->color565(212, 21, 32);
+    const uint16_t hubDark = gfx->color565(90, 0, 0);
+    drawThickLine(gfx, GAUGE_CX, GAUGE_CY, tipX, tipY, needleRed, 5);
+    gfx->fillCircle(GAUGE_CX, GAUGE_CY, 15, hubDark);
+    gfx->fillCircle(GAUGE_CX, GAUGE_CY, 11, needleRed);
+}
+
+void drawGaugeDigit(Arduino_GFX *gfx, uint8_t digit,
+                    int16_t x, int16_t y, uint16_t color) {
+    static constexpr uint8_t segments[10] = {
+        0x3f, 0x06, 0x5b, 0x4f, 0x66,
+        0x6d, 0x7d, 0x07, 0x7f, 0x6f
+    };
+    if (digit > 9) return;
+    const uint8_t mask = segments[digit];
+    auto horizontal = [&](int16_t segmentY) {
+        gfx->drawLine(x + 2, segmentY,     x + 6, segmentY,     color);
+        gfx->drawLine(x + 2, segmentY + 1, x + 6, segmentY + 1, color);
+    };
+    auto vertical = [&](int16_t segmentX, int16_t startY) {
+        gfx->drawLine(segmentX,     startY, segmentX,     startY + 4, color);
+        gfx->drawLine(segmentX + 1, startY, segmentX + 1, startY + 4, color);
+    };
+    if (mask & 0x01) horizontal(y);
+    if (mask & 0x02) vertical(x + 7, y + 1);
+    if (mask & 0x04) vertical(x + 7, y + 7);
+    if (mask & 0x08) horizontal(y + 12);
+    if (mask & 0x10) vertical(x, y + 7);
+    if (mask & 0x20) vertical(x, y + 1);
+    if (mask & 0x40) horizontal(y + 6);
+}
+
+void drawGaugeNumber(Arduino_GFX *gfx, uint16_t value,
+                     int16_t centerX, int16_t centerY, uint16_t color) {
+    char text[4];
+    snprintf(text, sizeof(text), "%u", (unsigned)value);
+    const uint8_t count = strlen(text);
+    constexpr int16_t digitAdvance = 11;
+    const int16_t totalWidth = count * digitAdvance - 1;
+    int16_t x = centerX - totalWidth / 2;
+    for (uint8_t i = 0; i < count; ++i, x += digitAdvance) {
+        drawGaugeDigit(gfx, text[i] - '0', x, centerY - 7, color);
+    }
+}
+
+void drawSimCleverLogo(Arduino_GFX *gfx) {
+    const bool dark = darkTheme;
+    const uint16_t navy = gfx->color565(dark ? 185 : 35,
+                                        dark ? 191 : 39,
+                                        dark ? 220 : 66);
+    const uint16_t green = gfx->color565(dark ? 90 : 65,
+                                         dark ? 210 : 145,
+                                         dark ? 110 : 68);
+
+    // Center the 9-character wordmark itself; the former footprint graphic
+    // intentionally does not participate in the visual width anymore.
+    constexpr int16_t logoWidth = 9 * 6 * 2;
+    constexpr int16_t logoX = (SCREEN_W - logoWidth) / 2;
+    gfx->setTextSize(2);
+    gfx->setTextColor(navy);
+    gfx->setCursor(logoX, 142);
+    gfx->print("Sim");
+    gfx->setTextColor(green);
+    gfx->print("Clever");
+}
+
+void flushFullUiFrame() {
+    if (!display || !canvas) return;
+    // Canvas rotation has already put every logical pixel in panel order.
+    // One complete transaction prevents partial regions from fighting over
+    // intersecting pixels on the CO5300.
+    display->draw16bitRGBBitmap(
+        0, 0, canvas->getFramebuffer(), SCREEN_W, SCREEN_H);
 }
 
 void drawStaticGauge() {
@@ -533,30 +631,35 @@ void drawStaticGauge() {
                                            dark ? 228 : 18,
                                            dark ? 232 : 18);
     canvas->fillScreen(outer);
-    canvas->fillCircle(GAUGE_CX, GAUGE_CY, 225, face);
-    for (int r = 218; r <= 225; ++r) canvas->drawCircle(GAUGE_CX, GAUGE_CY, r, ink);
+    // Radius 232 is the largest complete circle that fits around (233, 233)
+    // in the 466x466 framebuffer without clipping its right/bottom pixels.
+    canvas->fillCircle(GAUGE_CX, GAUGE_CY, 232, face);
+    for (int r = 225; r <= 232; ++r) {
+        canvas->drawCircle(GAUGE_CX, GAUGE_CY, r, ink);
+    }
 
-    for (int i = 0; i <= 60; ++i) {
-        const float pressure = i * 5.0f;
-        const bool major = (i % 4) == 0;
+    // Labels return to 0, 20, 40...300. The unlabeled odd tens (10, 30,
+    // 50...) still get long ticks so the 10 mmHg position remains obvious.
+    for (int i = 0; i <= 120; ++i) {
+        const float pressure = i * 2.5f;
+        const bool labeledTwenty = (i % 8) == 0;
+        const bool oddTen = (i % 8) == 4;
+        const bool five = !labeledTwenty && !oddTen && (i % 2) == 0;
         int16_t xo, yo, xi, yi;
-        pointOnGauge(pressure, 207, xo, yo);
-        pointOnGauge(pressure, major ? 177 : 190, xi, yi);
-        drawThickLine(canvas, xi, yi, xo, yo, ink, major ? 5 : 2);
+        pointOnGauge(pressure, 220, xo, yo);
+        pointOnGauge(pressure,
+                     labeledTwenty ? 191 : (oddTen ? 194 : (five ? 202 : 208)),
+                     xi, yi);
+        drawThickLine(canvas, xi, yi, xo, yo, ink,
+                      labeledTwenty ? 4 : (oddTen ? 3 : (five ? 2 : 1)));
 
-        if (major) {
-            int16_t tx, ty, x1, y1;
-            uint16_t tw, th;
-            pointOnGauge(pressure, 151, tx, ty);
-            char label[8];
-            snprintf(label, sizeof(label), "%d", (int)pressure);
-            canvas->setTextSize(2);
-            canvas->setTextColor(ink);
-            canvas->getTextBounds(label, 0, 0, &x1, &y1, &tw, &th);
-            canvas->setCursor(tx - tw / 2, ty - th / 2);
-            canvas->print(label);
+        if (labeledTwenty) {
+            int16_t tx, ty;
+            pointOnGauge(pressure, 166, tx, ty);
+            drawGaugeNumber(canvas, (uint16_t)lroundf(pressure), tx, ty, ink);
         }
     }
+    drawSimCleverLogo(canvas);
     drawPulseLed(canvas, false);
 }
 
@@ -575,8 +678,12 @@ bool readTouchPoint(int16_t &x, int16_t &y, bool &pressed) {
     const uint8_t yl = Wire.read();
     pressed = points > 0;
     if (pressed) {
-        x = ((xh & 0x0f) << 8) | xl;
-        y = ((yh & 0x0f) << 8) | yl;
+        const int16_t rawX = ((xh & 0x0f) << 8) | xl;
+        const int16_t rawY = ((yh & 0x0f) << 8) | yl;
+        // Inverse of the software framebuffer rotation: visible left/right
+        // gestures keep matching the rotated UI instead of the raw panel axes.
+        x = SCREEN_H - 1 - rawY;
+        y = rawX;
     }
     return true;
 }
@@ -947,19 +1054,19 @@ void updateTouchGesture() {
 
 bool beginUi() {
     bus = new Arduino_ESP32QSPI(LCD_CS, LCD_PCLK, LCD_D0, LCD_D1, LCD_D2, LCD_D3, false);
-    display = new Arduino_CO5300(bus, LCD_RST, 0, SCREEN_W, SCREEN_H, 6, 0, 6, 0);
+    display = new Arduino_CO5300(bus, LCD_RST, DISPLAY_ROTATION,
+                                SCREEN_W, SCREEN_H, 6, 0, 6, 0);
     if (!display || !display->begin(80000000)) return false;
-    canvas = new Arduino_Canvas(SCREEN_W, SCREEN_H, display);
+    canvas = new Arduino_Canvas(SCREEN_W, SCREEN_H, display,
+                                0, 0, CANVAS_ROTATION);
     if (!canvas || !canvas->begin(GFX_SKIP_OUTPUT_BEGIN)) return false;
     const size_t frameBytes = (size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t);
     backgroundPixels = static_cast<uint16_t *>(
         heap_caps_malloc(frameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    dirtyPixels = static_cast<uint16_t *>(
-        heap_caps_malloc(frameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!backgroundPixels || !dirtyPixels) return false;
+    if (!backgroundPixels) return false;
 
     drawStaticGauge();
-    canvas->flush();
+    flushFullUiFrame();
     memcpy(backgroundPixels, canvas->getFramebuffer(), frameBytes);
     return true;
 }
@@ -1382,7 +1489,6 @@ void processSample(int32_t raw, uint32_t milliVolts) {
 void updateUi() {
     static uint32_t displayedPulseCount = 0;
     static uint32_t pulseLedUntilMs = 0;
-    static bool pulseLedOn = false;
     static uint32_t appliedCancelRevision = 0;
     static float filteredUiBasePressure = -1.0f;
     static uint32_t appliedScreenPowerRevision = 0;
@@ -1393,10 +1499,6 @@ void updateUi() {
         screenOn = requestedScreenOn;
         if (screenOn) {
             display->displayOn();
-            // Restore the complete framebuffer once after waking. Normal
-            // operation immediately returns to dirty-region updates.
-            canvas->flush();
-            lastNeedlePressure = -1.0f;
         } else {
             display->displayOff();
         }
@@ -1412,11 +1514,6 @@ void updateUi() {
         const size_t frameBytes =
             (size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t);
         memcpy(backgroundPixels, canvas->getFramebuffer(), frameBytes);
-        canvas->flush();
-        lastNeedlePressure = -1.0f;
-        // The freshly rebuilt background already contains the unlit LED.
-        // A currently active beat will redraw it below in the new palette.
-        pulseLedOn = false;
     }
 
     // Re-check the pressure at draw time. This prevents a previously queued
@@ -1453,41 +1550,14 @@ void updateUi() {
                                           : 0.0f),
                                      0.0f, GAUGE_MAX_MMHG);
 
-    const float oldPressure = lastNeedlePressure < 0.0f ? pressure : lastNeedlePressure;
-    int16_t oldX, oldY, newX, newY;
-    pointOnGauge(oldPressure, NEEDLE_RADIUS, oldX, oldY);
-    pointOnGauge(pressure, NEEDLE_RADIUS, newX, newY);
+    // Full-frame composition: discard every previous dynamic pixel before
+    // drawing this frame. No dirty rectangles or overlap repair are needed.
+    const size_t frameBytes =
+        (size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t);
+    memcpy(canvas->getFramebuffer(), backgroundPixels, frameBytes);
 
-    uint16_t *frame = canvas->getFramebuffer();
-    if (oldX != newX || oldY != newY || lastNeedlePressure < 0.0f) {
-        constexpr int16_t margin = 9;
-        int16_t x1 = min(GAUGE_CX, min(oldX, newX)) - margin;
-        int16_t y1 = min(GAUGE_CY, min(oldY, newY)) - margin;
-        int16_t x2 = max(GAUGE_CX, max(oldX, newX)) + margin;
-        int16_t y2 = max(GAUGE_CY, max(oldY, newY)) + margin;
-        x1 = max((int16_t)0, x1); y1 = max((int16_t)0, y1);
-        x2 = min((int16_t)(SCREEN_W - 1), x2);
-        y2 = min((int16_t)(SCREEN_H - 1), y2);
-        const int16_t width = x2 - x1 + 1;
-        const int16_t height = y2 - y1 + 1;
-        for (int16_t row = y1; row <= y2; ++row) {
-            memcpy(frame + (size_t)row * SCREEN_W + x1,
-                   backgroundPixels + (size_t)row * SCREEN_W + x1,
-                   (size_t)width * sizeof(uint16_t));
-        }
-        const uint16_t needleRed = canvas->color565(212, 21, 32);
-        const uint16_t hubDark = canvas->color565(90, 0, 0);
-        drawThickLine(canvas, GAUGE_CX, GAUGE_CY, newX, newY, needleRed, 5);
-        canvas->fillCircle(GAUGE_CX, GAUGE_CY, 15, hubDark);
-        canvas->fillCircle(GAUGE_CX, GAUGE_CY, 11, needleRed);
-        for (int16_t row = 0; row < height; ++row) {
-            memcpy(dirtyPixels + (size_t)row * width,
-                   frame + (size_t)(y1 + row) * SCREEN_W + x1,
-                   (size_t)width * sizeof(uint16_t));
-        }
-        display->draw16bitRGBBitmap(x1, y1, dirtyPixels, width, height);
-    }
-    lastNeedlePressure = pressure;
+    int16_t newX, newY;
+    pointOnGauge(pressure, NEEDLE_RADIUS, newX, newY);
 
     const uint32_t nowMs = millis();
     const uint32_t pulseCount = visiblePulseCount;
@@ -1508,90 +1578,58 @@ void updateUi() {
 
     const bool shouldLightLed = fakeVisible && displayedPulseCount != 0 &&
                                 (int32_t)(pulseLedUntilMs - nowMs) > 0;
-    if (shouldLightLed != pulseLedOn) {
-        drawPulseLed(canvas, shouldLightLed);
-        constexpr int16_t ledMargin = PULSE_LED_RADIUS + 4;
-        constexpr int16_t ledX = PULSE_LED_CX - ledMargin;
-        constexpr int16_t ledY = PULSE_LED_CY - ledMargin;
-        constexpr int16_t ledSize = ledMargin * 2 + 1;
+    drawPulseLed(canvas, shouldLightLed);
 
-        for (int16_t row = 0; row < ledSize; ++row) {
-            memcpy(dirtyPixels + (size_t)row * ledSize,
-                   frame + (size_t)(ledY + row) * SCREEN_W + ledX,
-                   (size_t)ledSize * sizeof(uint16_t));
-        }
-        display->draw16bitRGBBitmap(ledX, ledY, dirtyPixels,
-                                    ledSize, ledSize);
-        pulseLedOn = shouldLightLed;
-    }
-
-    // Battery indicator occupies the free lower-left area and is redrawn only
-    // when its displayed value changes (normally once every five seconds).
-    static uint8_t lastBatteryPercent = 0xff;
-    static bool lastBatteryValid = false;
-    static bool lastBatteryCharging = false;
+    // Larger battery indicator remains centered against the lower edge and is
+    // rebuilt on every full frame from the latest sampled value.
     const uint8_t shownBatteryPercent = batteryPercent;
     const bool shownBatteryValid = batteryReadingValid;
     const bool shownBatteryCharging = batteryChargingEstimated;
-    if (themeChanged || shownBatteryPercent != lastBatteryPercent ||
-        shownBatteryValid != lastBatteryValid ||
-        shownBatteryCharging != lastBatteryCharging) {
-        lastBatteryPercent = shownBatteryPercent;
-        lastBatteryValid = shownBatteryValid;
-        lastBatteryCharging = shownBatteryCharging;
-        constexpr int16_t batX = 188, batY = 433;
-        constexpr int16_t batW = 91, batH = 13;
-        const bool dark = darkTheme;
-        const uint16_t face = canvas->color565(dark ? 5 : 244,
-                                                dark ? 7 : 240,
-                                                dark ? 9 : 230);
-        const uint16_t ink = canvas->color565(dark ? 225 : 40,
-                                               dark ? 228 : 45,
-                                               dark ? 232 : 48);
-        const uint16_t level = shownBatteryPercent > 20
-                                   ? canvas->color565(25, 145, 65)
-                                   : canvas->color565(190, 35, 30);
-        canvas->fillRect(batX, batY, batW, batH, face);
-        canvas->drawRect(batX, batY + 2, 20, 9, ink);
-        canvas->fillRect(batX + 20, batY + 4, 3, 4, ink);
-        if (shownBatteryValid) {
-            const int16_t fillW = (int16_t)shownBatteryPercent * 16 / 100;
-            if (fillW > 0) canvas->fillRect(batX + 2, batY + 4, fillW, 5, level);
-        }
-        canvas->setTextSize(1);
-        canvas->setTextColor(ink);
-        canvas->setCursor(batX + 29, batY + 4);
-        if (shownBatteryValid) {
-            canvas->printf("%u%%", (unsigned)shownBatteryPercent);
-            if (shownBatteryCharging) canvas->print(" CHG");
-        } else {
-            canvas->print("BAT --");
-        }
-        for (int16_t row = 0; row < batH; ++row) {
-            memcpy(dirtyPixels + (size_t)row * batW,
-                   frame + (size_t)(batY + row) * SCREEN_W + batX,
-                   (size_t)batW * sizeof(uint16_t));
-        }
-        display->draw16bitRGBBitmap(batX, batY, dirtyPixels, batW, batH);
-    }
-
-    // Compact connection strip in the otherwise unused area below the pulse
-    // LED. It is redrawn last so the moving needle cannot erase it.
-    const WifiNodeStatus wifi = wifiNodeStatus(WIFI_NODE_ID);
-    const BleNodeStatus ble = bleNodeStatus();
-    static uint8_t lastStatusBits = 0xff;
-    const uint8_t statusBits = (wifi.connected ? 0x01 : 0) |
-                               (wifi.synced ? 0x02 : 0) |
-                               (ble.connected ? 0x04 : 0) |
-                               (ble.synced ? 0x08 : 0);
-    if (themeChanged || statusBits != lastStatusBits) {
-        lastStatusBits = statusBits;
-    constexpr int16_t statusX = 195, statusY = 449;
-    constexpr int16_t statusW = 76, statusH = 13;
+    constexpr int16_t batX = BATTERY_X, batY = BATTERY_Y;
+    constexpr int16_t batW = BATTERY_W, batH = BATTERY_H;
     const bool dark = darkTheme;
     const uint16_t face = canvas->color565(dark ? 5 : 244,
                                             dark ? 7 : 240,
                                             dark ? 9 : 230);
+    const uint16_t ink = canvas->color565(dark ? 225 : 40,
+                                           dark ? 228 : 45,
+                                           dark ? 232 : 48);
+    const uint16_t level = shownBatteryPercent > 20
+                               ? canvas->color565(25, 145, 65)
+                               : canvas->color565(190, 35, 30);
+    char batteryText[12];
+    if (shownBatteryValid) {
+        snprintf(batteryText, sizeof(batteryText),
+                 shownBatteryCharging ? "%u%% CHG" : "%u%%",
+                 (unsigned)shownBatteryPercent);
+    } else {
+        snprintf(batteryText, sizeof(batteryText), "BAT --");
+    }
+    constexpr int16_t iconWidth = 38;
+    constexpr int16_t contentGap = 9;
+    const int16_t textWidth = strlen(batteryText) * 12;
+    const int16_t contentWidth = iconWidth + contentGap + textWidth;
+    const int16_t contentX = batX + (batW - contentWidth) / 2;
+
+    canvas->fillRect(batX, batY, batW, batH, face);
+    canvas->drawRect(contentX, batY + 5, 34, 17, ink);
+    canvas->fillRect(contentX + 34, batY + 10, 4, 7, ink);
+    if (shownBatteryValid) {
+        const int16_t fillW = (int16_t)shownBatteryPercent * 28 / 100;
+        if (fillW > 0) {
+            canvas->fillRect(contentX + 3, batY + 8, fillW, 11, level);
+        }
+    }
+    canvas->setTextSize(2);
+    canvas->setTextColor(ink);
+    canvas->setCursor(contentX + iconWidth + contentGap, batY + 7);
+    canvas->print(batteryText);
+
+    // Connection strip is also rebuilt into the same framebuffer.
+    const WifiNodeStatus wifi = wifiNodeStatus(WIFI_NODE_ID);
+    const BleNodeStatus ble = bleNodeStatus();
+    constexpr int16_t statusX = STATUS_X, statusY = STATUS_Y;
+    constexpr int16_t statusW = STATUS_W, statusH = STATUS_H;
     const uint16_t ok = canvas->color565(dark ? 65 : 0,
                                           dark ? 220 : 120,
                                           dark ? 105 : 45);
@@ -1599,23 +1637,20 @@ void updateUi() {
                                            dark ? 80 : 25,
                                            dark ? 75 : 25);
     canvas->fillRect(statusX, statusY, statusW, statusH, face);
-    canvas->setTextSize(1);
+    canvas->setTextSize(2);
     canvas->setTextColor(wifi.synced ? ok : bad);
-    canvas->setCursor(statusX, statusY + 2);
+    canvas->setCursor(statusX + 5, statusY + 5);
     canvas->print("W:");
     canvas->print(wifi.synced ? "OK" : (wifi.connected ? "SYNC" : "OFF"));
     canvas->setTextColor(ble.synced ? ok : bad);
-    canvas->setCursor(statusX + 38, statusY + 2);
+    canvas->setCursor(statusX + 101, statusY + 5);
     canvas->print("B:");
     canvas->print(ble.synced ? "OK" : (ble.connected ? "SYNC" : "OFF"));
-    for (int16_t row = 0; row < statusH; ++row) {
-        memcpy(dirtyPixels + (size_t)row * statusW,
-               frame + (size_t)(statusY + row) * SCREEN_W + statusX,
-               (size_t)statusW * sizeof(uint16_t));
-    }
-    display->draw16bitRGBBitmap(statusX, statusY, dirtyPixels,
-                                statusW, statusH);
-    }
+
+    // Needle is always the final layer, then the entire frame is transferred
+    // in one operation. This intentionally favors correctness over bandwidth.
+    drawNeedleLayer(canvas, newX, newY);
+    flushFullUiFrame();
 }
 
 void sensorTask(void *) {

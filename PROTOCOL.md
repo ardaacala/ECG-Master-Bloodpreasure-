@@ -52,7 +52,7 @@ bu alanı içermez; master hedef filtresini `bleSendTrigger()` içinde yapar.
 ## Cihazlar
 
 - Wi-Fi: mantıksal ID 1, `ECG_LEFT`, TCP 3333.
-- BLE: mantıksal ID 2, reklam adı `LED_NODE_1`.
+- BLE: mantıksal ID 2, reklam adı `RTCOUND20180`.
 
 ## BLE UUID'leri
 

@@ -19,7 +19,7 @@ Her değişiklikten sonra aşağıdakileri kontrol edin:
 - Ripple tepesi her beat'te sabit 1.5 mmHg ve süresi BPM periyoduyla sınırlı mı?
 - BAT_ADC örnekleri burst yerine zamana yayılmış mı?
 - Dokunmatik I²C arızasında sıkı retry/log döngüsü yerine backoff çalışıyor mu?
-- BLE adı master ve `slave2_ble` içinde aynı mı (`LED_NODE_1`)?
+- BLE adı master ve `slave2_ble` içinde aynı mı (`RTCOUND20180`)?
 - Wi-Fi ve BLE packed paket boyutları karşı uçlarla aynı mı?
 - GPIO2 basınç sensörü ve GPIO4 BAT_ADC çakışmadan korunuyor mu?
 - Dokunmatik/QMI8658 ortak GPIO47/48 hattı değiştirilmiş mi?

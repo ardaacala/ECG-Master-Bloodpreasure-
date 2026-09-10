@@ -31,5 +31,6 @@ bool bleTakeLedAck(BleLedAck &ack);
 bool bleTakePhoneCommand(BlePhoneCommand &command);
 void blePublishBpm(uint16_t bpm, uint16_t systolicMmHg,
                    uint16_t diastolicMmHg);
+void blePublishBatteryLevel(uint8_t percent, bool valid);
 void blePublishPhoneResult(uint32_t eventId, bool wifiQueued, bool bleQueued);
 uint32_t bleRecommendedLeadUs();

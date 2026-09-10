@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- CO5300 uzerinde ibre, LED, baglanti ve batarya katmanlarinin cakismasinda
+  gorulen dikdortgen/hayalet izlerini onlemek icin dirty-region aktarimini
+  kaldirir; 30 Hz UI her kareyi tek tamamlanmis framebuffer olarak gonderir.
+- Fiziksel BLE slave reklam filtresini gercek cihaz adi `RTCOUND20180` ile
+  eslestirir; master ve `slave2_ble` varsayilanlari birlikte guncellenir.
+- Tek bir senkron alicinin yeterli oldugunu netlestirir ve eski Wi-Fi hazirlik
+  esigini iki cihazdan bir cihaza indirir; Wi-Fi/BLE state teslimati birbirini
+  beklemez.
+
 ## 3.0.0 - 2026-09-09
 
 - State degismese de baglanti sagligini ve kacirilan paketlerden otomatik

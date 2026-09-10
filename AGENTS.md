@@ -24,7 +24,7 @@ Version 3 behavior unless the user explicitly requests a hardware migration.
   charger detection from software. Preserve the charge estimator's 82 kOhm
   ISET/500 mA, 1500 mAh CC/CV model and fast USB-removal/OCV correction.
 - `slave1_wifi` is logical device 1, GPIO2 active-high in its default environment.
-- `slave2_ble` is logical device 2, advertises `LED_NODE_1`, GPIO4 active-low.
+- `slave2_ble` is logical device 2, advertises `RTCOUND20180`, GPIO4 active-low.
 
 ## Timing and concurrency invariants
 
@@ -37,6 +37,8 @@ Version 3 behavior unless the user explicitly requests a hardware migration.
   on every beat.
 - V3 physical slaves retain the latest trigger state and generate BPM locally.
   Their first beat and the UI use the same scheduled execution timestamp.
+- One synchronized receiver is sufficient. Wi-Fi and BLE delivery are independent;
+  never gate either transport on a second slave being connected.
 - Send `TriggerStatePacket` immediately when BPM/zone/delay changes or after a
   reconnect. While unchanged, repeat it at 1, 2, 4, 8, 10, 10... second
   intervals; reset the backoff on state change or reconnect. A matching ACK is
