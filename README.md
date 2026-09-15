@@ -1,11 +1,29 @@
-# State based Trigger BLE Master Software — Version 4.0.0
+# State based Trigger BLE Master Software — Version 4.1.0
 
 Waveshare ESP32-S3 Touch AMOLED 1.43 (466×466) için PlatformIO tabanlı tansiyon
 simülatörü/master firmware'i. Ekrandaki kadran, sentetik nabız salınımı, Wi-Fi
 slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 
-> Bu depo `v4.0.0` donanım düzenini hedefler. 1.91 inç veya farklı pin dizilimli
-> kartlara doğrudan yüklenmemelidir.
+> Bu depo `v4.0.0` ile aynı donanım düzenini hedefler; `v4.1.0` donanımda
+> değişiklik getirmez. 1.91 inç veya farklı pin dizilimli kartlara doğrudan
+> yüklenmemelidir.
+
+## Version 4.1.0 şarj farkındalıklı batarya göstergesi
+
+- Şarj sırasında gösterilen yüzdeye ölçülmüş bir şarj/dinlenmiş gerilim haritası
+  tavan olarak uygulanır. Şarj gerilimi önce dinlenmiş karşılığına çevrilir,
+  sonra mevcut 3.20–4.20 V eğrisinden yüzdeye geçilir; sabit akım bölgesinde ham
+  eğriye göre 21 puana varan fazla gösterim ortadan kalkar.
+- Harita, Power-Xtra PX103049 hücresinden alınan 13 ölçüm çiftidir
+  ([`powerxtra-px103049-voltage-map`](https://github.com/ardaacala/powerxtra-px103049-voltage-map))
+  ve deponun 10 mV adımlı lookup tablosunu 0.05 mV içinde yeniden üretir.
+  Ölçülen 3426–4140 mV aralığının dışına ekstrapolasyon yapılmaz.
+- Şarj moduna ikinci bir giriş yolu eklenir: 5 dakikalık pencerelerde arka arkaya
+  iki kez en az 20 mV sürekli yükseliş. USB zaten takılıyken açılan kartta
+  yakalanacak bir gerilim adımı olmadığı için birincil tespit çalışmıyordu.
+- CC/CV zaman modeli ve hızlı USB-çıkarma davranışı korunur; harita yalnızca
+  tavan koyar, 4100 mV üzerinde sabit gerilim aşaması başladığı için bırakılır.
+- Version 3 state trigger paket sözleşmesi ve slave davranışı değişmez.
 
 ## Version 4.0.0 tam ekran UI
 
@@ -266,8 +284,9 @@ GPIO4, kart üzerindeki BAT_ADC direnç bölücüsünü okur. Her ölçüm grubu
 örnek 20 ms aralıklarla alınır; böylece basınç sensörü tek seferde bloke edilmez.
 ×3 bölücü katsayısı ve düşük geçiren filtre uygulanır. Yüzde doğrusal `map()`
 ile değil, 3.20–4.20 V Li-Po eğrisi üzerinde
-lookup table + interpolasyonla hesaplanır. USB/şarj sırasında değer doğal olarak
-şarj devresinden etkilenebilir.
+lookup table + interpolasyonla hesaplanır. USB/şarj sırasında okunan gerilim
+şarj devresinden etkilenir; bu sapma ölçülmüş bir şarj/dinlenmiş gerilim
+haritasıyla telafi edilir.
 
 ### Feature: Battery level while charging fix
 
@@ -288,10 +307,91 @@ sıcaklık ve gerçek kapasite nedeniyle bu yöntem fuel-gauge entegresi kadar k
 değildir, fakat şarj gerilimini doğrudan yüzdeye çevirmekten belirgin biçimde
 daha gerçekçidir.
 
+### Şarj gerilimi → dinlenmiş gerilim haritası
+
+CC/CV zaman modelinin üstüne, ölçülmüş bir gerilim haritası tavan olarak
+uygulanır. Kaynak veri
+[`ardaacala/powerxtra-px103049-voltage-map`](https://github.com/ardaacala/powerxtra-px103049-voltage-map)
+deposundadır: kartın kullandığı Power-Xtra PX103049 (3.7 V / 1500 mAh Li-Po)
+hücresinde, şarj sürerken okunan gerilim ile şarj kesildikten 60 s sonra okunan
+gerilim 13 noktada eşleştirilmiştir.
+
+Kablo takılıyken iç direnç ve polarizasyon BAT_ADC'yi açık devre geriliminin
+belirgin biçimde üstüne taşır: sabit akım boyunca ~140 mV, şarj sabit gerilime
+geçip akım azaldıkça ~51 mV. Ham gerilimi doğrudan OCV eğrisine vermek, yarı boş
+bir hücreyi neredeyse dolu göstermenin sebebidir. Firmware bu yüzden önce şarj
+gerilimini dinlenmiş karşılığına çevirir, sonra mevcut 3.20–4.20 V eğrisinden
+yüzdeye geçer:
+
+| Şarjda okunan | Ham eğri | Haritalı | Fark |
+|---:|---:|---:|---:|
+| 3650 mV | %28 | %11 | 17 puan |
+| 3721 mV | %38 | %18 | 20 puan |
+| 3900 mV | %65 | %44 | 21 puan |
+| 4020 mV | %82 | %66 | 16 puan |
+| 4100 mV | %90 | %83 | 7 puan |
+
+`BATTERY_CHARGE_REST_MAP` içindeki 13 ölçüm çifti, deponun 10 mV adımlı
+`lookup.csv` tablosunu 0.05 mV içinde yeniden üretir; ölçülen 3426–4140 mV
+aralığının dışına **ekstrapolasyon yapılmaz**.
+
+Harita gösterilen değerin kendisi değil, **tavanıdır**. Görünen eğriyi hâlâ CC/CV
+zaman modeli çizer; harita yalnızca modelin hücrenin kendi geriliminin
+desteklediğinden ileri gitmesini engeller. Bunun iki sebebi var: kaynak ölçümde
+her nokta yalnızca 60 s dinlendirildiği için 3.35–3.52 V aralığındaki dinlenmiş
+değerler bir miktar yüksek kalmıştır, ve veri oda sıcaklığında tek bir hücrenin
+tek koşusudur. Şarj oturumu boyunca ayrıca bir taban tutulur; gösterge kablo
+takılıyken hiçbir zaman geri adım atmaz.
+
+`BATTERY_CHARGE_MAP_RELEASE_MV` (4100 mV) üzerinde tavan bırakılır: bu noktadan
+sonra ETA6098 sabit gerilim aşamasındadır, gerilimi şarj IC'si sabitler ve artık
+doluluğu takip etmez. Son bölümü CC/CV modeli tek başına %100'e taşır. Eşik,
+kaynak koşunun takıldığı 4140 mV platosunun bir harita adımı altındadır; aradaki
+pay, aynı koşunun belgelediği ±20–30 mV mutlak ADC kaymasını karşılar.
+
+### İkinci şarj tespiti: sürekli yükseliş
+
+Birincil tespit, kablo takıldığında BAT_ADC'de oluşan **ani adımı** yakalar ve üç
+ölçümde (~15 s) doğrular. Ama bir boşluk bırakır: **sistem USB zaten takılıyken
+açılırsa ortada yakalanacak bir adım yoktur.** O durumda şarj modu hiç devreye
+girmez, yüzde ham şarj geriliminden hesaplanır ve gereğinden yüksek görünür.
+
+İkinci bir yol bu boşluğu donanım eklemeden kapatır. Dayandığı fizik şu: sabit
+akım şarjı bu hücreyi her beş dakikada 30–45 mV yukarı taşır ve bunu saatlerce
+sürdürür; buna karşılık yük kalktığında oluşan dinlenme toparlanması bir iki
+dakikada biter ve düzleşir. Ayırt edici olan tek bir yükseliş değil, yükselişin
+**sürmesi**.
+
+Bu yüzden 5 dakikalık pencereler kullanılır. Bir pencere ancak sonunda en az
+20 mV artış görülürse sayılır; **arka arkaya iki pencere** gerekir. Düşüş
+kontrolü pencere başlangıcına göre değil **koşan tepe noktasına** göre yapılır —
+kritik olan kısım budur, çünkü "yüksel, sonra düzleş" şekli pencere boyunca net
+kazanç gösterse bile tepeden gerileme sayacı sıfırlar. Toplam gecikme yaklaşık
+10–15 dakikadır; normal kablo takma durumunu hâlâ hızlı adım tespiti karşılar.
+
+Bu yol devreye girdiğinde güvenilir bir şarj-öncesi okuma **yoktur** — zaten tam
+da bu yüzden devreye girmiştir. Bu durumda çapayı şarj/dinlenmiş gerilim
+haritası sağlar ve taban sıfırda bırakılır, böylece harita ham gerilimin şişirdiği
+yüzdeyi aşağı çekebilir. Düzeltme ani değil, güncelleme başına 1 puan adımla
+yürüyerek yapılır; kablo takılıyken geriye sıçrayan bir gösterge arıza gibi
+okunur.
+
+Doğrulama host tarafında dokuz senaryoyla yapıldı: soğuk açılış, dinlenme
+toparlanması, normal kablo takma regresyonu, normal deşarj, ±8 mV ADC gürültüsü,
+kablo çıkarma, yetmeden kesilen yükseliş ve yavaş toparlanma. Soğuk açılış
+senaryosunda gösterge %38'den başlayıp haritanın işaret ettiği %36'ya iniyor;
+aynı noktada ham eğri %65 derdi.
+
+**Bilinen sınır:** cihaz şarjın sabit gerilim kuyruğundayken (>4100 mV) açılırsa
+artış hızı eşiğin altında kalır ve bu yol tetiklenmez. Orada sapma zaten küçüktür
+— ham eğri %94, gerçek ~%89. Kesin çözüm için VBUS veya `STAT` hattının bir
+GPIO'ya bağlanması gerekir.
+
 Kartın ETA6098 `STAT` çıkışı ESP32 GPIO'suna bağlı olmadığı için yazılım yalnızca
 BAT_ADC ile şarj kablosunu kesin olarak algılayamaz. Sistem USB zaten takılıyken
-soğuk açılırsa geçmiş bir batarya-only referansı yoktur; bu donanım sınırlaması
-ayrı bir VBUS/STAT bağlantısı olmadan tamamen çözülemez.
+soğuk açılırsa geçmiş bir batarya-only referansı yoktur. Yukarıdaki sürekli
+yükseliş tespiti bu durumu 10–15 dakika içinde telafi eder, fakat anlık ve kesin
+bir cevap ancak ayrı bir VBUS/STAT bağlantısıyla mümkündür.
 
 ## Proje yapısı
 

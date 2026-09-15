@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 4.1.0 - 2026-09-15
+
+- Sarj sirasinda gosterilen batarya yuzdesine olculmus bir sarj/dinlenmis
+  gerilim haritasi tavan olarak uygulanir. 13 olcum cifti Power-Xtra PX103049
+  hucresinden alinmistir (`ardaacala/powerxtra-px103049-voltage-map`) ve
+  deponun 10 mV adimli lookup tablosunu 0.05 mV icinde yeniden uretir; olculen
+  3426-4140 mV araliginin disina ekstrapolasyon yapilmaz.
+- Sarj gerilimi once dinlenmis karsiligina cevrilir, sonra mevcut 3.20-4.20 V
+  egrisinden yuzdeye gecer; sabit akim bolgesinde ham egriye gore 21 puana
+  varan fazla gosterim ortadan kalkar.
+- CC/CV zaman modeli korunur ve gosterilen egriyi cizmeye devam eder; harita
+  yalnizca tavan koyar. 4100 mV uzerinde sabit gerilim asamasi basladigi icin
+  tavan birakilir. Sarj oturumu boyunca tutulan taban sayesinde gosterge kablo
+  takiliyken geri adim atmaz.
+- Sarj moduna ikinci bir giris yolu ekler: 5 dakikalik pencerelerde arka arkaya
+  iki kez en az 20 mV surekli yukselis. USB zaten takiliyken acilan kartta
+  yakalanacak bir gerilim adimi olmadigi icin birincil tespit calismiyordu.
+  Dusus kontrolu pencere basina degil kosan tepe noktasina gore yapilir; boylece
+  yuk kalkinca olusan "yuksel sonra duzles" toparlanmasi yanlis pozitif vermez.
+- Bu yolla acilan oturumda guvenilir sarj-oncesi okuma olmadigi icin capayi
+  sarj/dinlenmis gerilim haritasi saglar ve taban sifirda birakilir. Asagi
+  duzeltme guncelleme basina 1 puan adimla yurur, ani sicrama yapmaz.
 
 ## 4.0.0 - 2026-09-10
 

@@ -43,6 +43,27 @@ constexpr float BATTERY_VOLTAGE_FALL_ALPHA = 0.35f;
 constexpr float BATTERY_SOC_FALL_ALPHA = 0.45f;
 constexpr float BATTERY_SOC_RISE_ALPHA = 0.12f;
 constexpr float BATTERY_SOC_HYSTERESIS_PERCENT = 1.0f;
+// Above this charge terminal voltage the ETA6098 is deep in constant-voltage
+// taper: the voltage is pinned by the charger and no longer tracks state of
+// charge, so the measured charge/rest map stops being informative and the CC/CV
+// integrator alone carries the last stretch to 100%. It sits one map step below
+// the 4140 mV plateau the reference run got stuck at, which keeps margin for the
+// +/-20-30 mV absolute ADC offset that run documents.
+constexpr uint16_t BATTERY_CHARGE_MAP_RELEASE_MV = 4100;
+// Second, slower route into charge mode, for the case the step detector cannot
+// see: a board that boots with USB already attached never produces a step, so
+// there is nothing to catch. Constant-current charging lifts this pack 30-45 mV
+// every five minutes and keeps doing it for hours, while a cell merely relaxing
+// after a load drop recovers within a minute or two and then flattens out.
+// Requiring two consecutive qualifying windows is what separates the two.
+constexpr uint32_t BATTERY_RISE_WINDOW_MS = 300000;
+constexpr uint16_t BATTERY_RISE_WINDOW_MIN_MV = 20;
+constexpr uint8_t BATTERY_RISE_WINDOWS_REQUIRED = 2;
+constexpr uint16_t BATTERY_RISE_RESET_MV = 10;
+// A downward correction walks to the map ceiling instead of snapping to it.
+// Only the sustained-rise path can open a session above the ceiling, and a
+// gauge that jumps backwards while the cable is in reads as a fault.
+constexpr float BATTERY_CHARGE_CORRECTION_STEP_PERCENT = 1.0f;
 constexpr uint16_t ADC_RESOLUTION_MAX = 4095;
 constexpr uint16_t SENSOR_NOMINAL_ZERO_MV = 200;
 constexpr uint16_t SENSOR_ZERO_MIN_VALID_MV = 100;
@@ -227,6 +248,66 @@ uint8_t batteryPercentFromMillivolts(uint16_t millivolts) {
     return 0;
 }
 
+// Measured on a Power-Xtra PX103049 (3.7 V / 1500 mAh Li-Po), the cell this
+// board ships with: each pair is the terminal voltage read while charging and
+// the same cell's voltage 60 s after the charge path was switched off. Source
+// data, method and caveats:
+// https://github.com/ardaacala/powerxtra-px103049-voltage-map
+// While the cable is in, IR drop and polarization lift BAT_ADC well above open
+// circuit - a steady ~140 mV through constant current, closing to ~51 mV as the
+// charger tapers. Feeding that raw voltage into the OCV curve is what reports a
+// half-empty cell as nearly full; mapping it back to its rested equivalent
+// first removes the bias.
+struct BatteryChargeRestPoint { float chargingMv; float restedMv; };
+constexpr BatteryChargeRestPoint BATTERY_CHARGE_REST_MAP[] = {
+    {3426.44f, 3260.81f}, {3482.88f, 3353.94f}, {3558.56f, 3415.94f},
+    {3606.88f, 3467.69f}, {3663.88f, 3519.69f}, {3721.75f, 3579.50f},
+    {3784.12f, 3645.56f}, {3841.00f, 3702.88f}, {3901.62f, 3762.25f},
+    {3961.38f, 3834.31f}, {4020.25f, 3907.44f}, {4081.50f, 3999.75f},
+    {4140.12f, 4089.25f}
+};
+constexpr size_t BATTERY_CHARGE_REST_MAP_COUNT =
+    sizeof(BATTERY_CHARGE_REST_MAP) / sizeof(BATTERY_CHARGE_REST_MAP[0]);
+
+// Piecewise-linear between measured pairs, never extrapolated: outside the
+// 3426-4140 mV span the reference run has no data, so the caller keeps using
+// the CC/CV estimate on its own.
+bool batteryRestedMvFromChargingMv(uint16_t chargingMv, float *restedMvOut) {
+    const float mv = (float)chargingMv;
+    if (mv < BATTERY_CHARGE_REST_MAP[0].chargingMv) return false;
+    if (mv > BATTERY_CHARGE_REST_MAP[BATTERY_CHARGE_REST_MAP_COUNT - 1]
+                 .chargingMv) {
+        return false;
+    }
+    for (size_t i = 1; i < BATTERY_CHARGE_REST_MAP_COUNT; ++i) {
+        const BatteryChargeRestPoint &low = BATTERY_CHARGE_REST_MAP[i - 1];
+        const BatteryChargeRestPoint &high = BATTERY_CHARGE_REST_MAP[i];
+        if (mv <= high.chargingMv) {
+            const float spanMv = high.chargingMv - low.chargingMv;
+            const float ratio = (mv - low.chargingMv) / spanMv;
+            *restedMvOut = low.restedMv + ratio * (high.restedMv - low.restedMv);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Highest percentage the charge-time integrator is allowed to display for a
+// given charge voltage. This is a ceiling, not the shown value: the reference
+// run rested each point for only 60 s, which leaves its 3.35-3.52 V rested
+// numbers reading somewhat high, and it is a single cell at room temperature.
+// The CC/CV model still draws the smooth curve underneath; the map only stops
+// it from running ahead of what the cell's own voltage supports.
+bool batteryChargingPercentCeiling(uint16_t chargingMv, float *ceilingOut) {
+    if (chargingMv > BATTERY_CHARGE_MAP_RELEASE_MV) return false;
+    float restedMv = 0.0f;
+    if (!batteryRestedMvFromChargingMv(chargingMv, &restedMv)) return false;
+    const uint16_t restedRounded =
+        (uint16_t)constrain(lroundf(restedMv), 0L, 5000L);
+    *ceilingOut = (float)batteryPercentFromMillivolts(restedRounded);
+    return true;
+}
+
 float batteryChargeTaperFactor(float percent) {
     // ETA6098 charges at constant current for most of the cycle and tapers near
     // 4.2 V. These bands keep the time estimate realistic near full charge.
@@ -285,6 +366,12 @@ void updateBatteryMeasurement() {
     static uint32_t chargeCandidateStartedMs = 0;
     static bool charging = false;
     static uint16_t chargingPeakMv = 0;
+    static float chargingFloorPercent = 0.0f;
+    static uint16_t riseWindowStartMv = 0;
+    static uint16_t riseWindowPeakMv = 0;
+    static uint32_t riseWindowStartedMs = 0;
+    static bool riseWindowActive = false;
+    static uint8_t sustainedRiseWindows = 0;
     static uint8_t fullUnplugConfirmSamples = 0;
     const uint16_t measuredMv = (uint16_t)constrain(
         lroundf(measuredBatteryMv), 0L, 5000L);
@@ -340,13 +427,70 @@ void updateBatteryMeasurement() {
         chargeCandidate = false;
         chargeConfirmSamples = 0;
         fullUnplugConfirmSamples = 0;
+        chargingFloorPercent = 0.0f;
+        sustainedRiseWindows = 0;
+        riseWindowActive = false;
         batteryChargingEstimated = false;
     } else if (charging) {
         chargingPeakMv = max(chargingPeakMv, measuredMv);
         estimatedBatteryPercent = advanceBatteryChargeEstimate(
             estimatedBatteryPercent, elapsedMs);
+        float ceilingPercent = 0.0f;
+        if (batteryChargingPercentCeiling(publishedMv, &ceilingPercent)) {
+            // The floor keeps the indicator from stepping backwards on a
+            // momentary ceiling dip; the ceiling caps further rise. A session
+            // opened above the ceiling walks down to it a step per update
+            // rather than snapping, and the floor never latches a value the
+            // ceiling has not yet approved.
+            const float lowerBound = max(ceilingPercent, chargingFloorPercent);
+            if (estimatedBatteryPercent > lowerBound) {
+                estimatedBatteryPercent =
+                    max(lowerBound,
+                        estimatedBatteryPercent -
+                            BATTERY_CHARGE_CORRECTION_STEP_PERCENT);
+            } else {
+                estimatedBatteryPercent =
+                    max(estimatedBatteryPercent, chargingFloorPercent);
+            }
+            chargingFloorPercent =
+                max(chargingFloorPercent,
+                    min(estimatedBatteryPercent, ceilingPercent));
+        } else {
+            chargingFloorPercent =
+                max(chargingFloorPercent, estimatedBatteryPercent);
+        }
         batteryChargingEstimated = true;
     } else {
+        // Only an uninterrupted climb qualifies. Measuring the fall against
+        // the running peak rather than the window start is what rejects the
+        // rise-then-plateau shape of a cell relaxing after a load drop: a net
+        // gain across the window is not enough, the climb has to still be
+        // going. The filtered voltage is used so ADC noise cannot chop a
+        // window up, and a window is judged only once it has fully elapsed.
+        if (!riseWindowActive ||
+            publishedMv + BATTERY_RISE_RESET_MV < riseWindowPeakMv) {
+            riseWindowActive = true;
+            riseWindowStartMv = publishedMv;
+            riseWindowPeakMv = publishedMv;
+            riseWindowStartedMs = nowMs;
+            sustainedRiseWindows = 0;
+        } else {
+            riseWindowPeakMv = max(riseWindowPeakMv, publishedMv);
+            if (nowMs - riseWindowStartedMs >= BATTERY_RISE_WINDOW_MS) {
+                if (publishedMv >=
+                    riseWindowStartMv + BATTERY_RISE_WINDOW_MIN_MV) {
+                    if (sustainedRiseWindows < UINT8_MAX) {
+                        ++sustainedRiseWindows;
+                    }
+                } else {
+                    sustainedRiseWindows = 0;
+                }
+                riseWindowStartMv = publishedMv;
+                riseWindowPeakMv = publishedMv;
+                riseWindowStartedMs = nowMs;
+            }
+        }
+
         const bool newChargeStep =
             previousMeasuredBatteryMv >= 2500 &&
             measuredMv >= previousMeasuredBatteryMv + BATTERY_CHARGE_STEP_MV;
@@ -372,15 +516,40 @@ void updateBatteryMeasurement() {
             chargingPeakMv = measuredMv;
             chargeCandidate = false;
             chargeConfirmSamples = 0;
+            sustainedRiseWindows = 0;
+            riseWindowActive = false;
             // Include the short confirmation interval without ever using the
             // charge-biased voltage as a percentage.
             estimatedBatteryPercent = advanceBatteryChargeEstimate(
                 preChargeBatteryPercent, nowMs - chargeCandidateStartedMs);
+            // The last battery-only reading is the trustworthy one, so it
+            // anchors the session floor the charge map may not pull under.
+            chargingFloorPercent = preChargeBatteryPercent;
+            float entryCeilingPercent = 0.0f;
+            if (batteryChargingPercentCeiling(publishedMv,
+                                              &entryCeilingPercent)) {
+                estimatedBatteryPercent =
+                    max(min(estimatedBatteryPercent, entryCeilingPercent),
+                        chargingFloorPercent);
+            }
             batteryChargingEstimated = true;
         } else if (chargeCandidate) {
             // Hold the last battery-only result during the 15 s confirmation.
             estimatedBatteryPercent = preChargeBatteryPercent;
             batteryChargingEstimated = false;
+        } else if (sustainedRiseWindows >= BATTERY_RISE_WINDOWS_REQUIRED) {
+            // No trustworthy pre-charge reading exists on this path - it
+            // exists precisely because the cable was already in when the board
+            // booted - so the charge/rest map supplies the anchor instead.
+            // The floor stays at zero so that map is free to correct a
+            // percentage the raw charge voltage inflated; the charging branch
+            // walks it down rather than snapping.
+            charging = true;
+            chargingPeakMv = measuredMv;
+            chargingFloorPercent = 0.0f;
+            sustainedRiseWindows = 0;
+            riseWindowActive = false;
+            batteryChargingEstimated = true;
         } else if (voltagePercent >
                    estimatedBatteryPercent + BATTERY_SOC_HYSTERESIS_PERCENT) {
             estimatedBatteryPercent +=
