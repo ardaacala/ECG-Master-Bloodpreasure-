@@ -58,7 +58,8 @@ definitions are in `include/protocol.h` and are copied into both slave projects.
 
 The current topology creates one packet for device 1 over Wi-Fi and one packet
 for device 2 over BLE. `actionDelayMs` is currently zero. The first effective
-time is scheduled 600 ms ahead so the master UI and slave output share a phase.
+time is scheduled 600 ms ahead so the master's local pulse LED and slave output
+share a phase.
 
 ## Slave rules
 

@@ -14,7 +14,7 @@ masterActualUs = localActualUs - clockOffsetUs
 V3 state-trigger paketi ve ACK davranisinin ayrintili entegrasyon sozlesmesi
 [docs/STATE_TRIGGER_PROTOCOL_V3.md](docs/STATE_TRIGGER_PROTOCOL_V3.md) dosyasindadir.
 Master ilk fazi ortak ve sabit 600 ms lead ile gelecege planlar. Slave'ler bu
-fazdan sonra BPM ritmini yerel uretir. UI tekrar korumasi 200 ms'dir.
+fazdan sonra BPM ritmini yerel uretir. Yerel tekrar korumasi 200 ms'dir.
 
 ## Mesaj tipleri
 

@@ -1,8 +1,9 @@
 # Repository instructions for coding agents
 
-This is hardware firmware, not a generic ESP32 sample. Preserve the verified
-Version 4 behavior and Version 3 transport contract unless the user explicitly
-requests a hardware migration.
+This is hardware firmware, not a generic ESP32 sample. This branch is the
+headless (no display, no touch) Version 5 master derived from Version 4.1.0.
+Preserve its behavior and the Version 3 transport contract unless the user
+explicitly requests a hardware migration.
 
 ## Required workflow
 
@@ -15,13 +16,18 @@ requests a hardware migration.
 
 ## Hardware invariants
 
-- Target: Waveshare ESP32-S3 Touch AMOLED 1.43, 466x466, 16 MB flash/8 MB PSRAM.
-- Pressure ADC is GPIO2. Onboard battery ADC is GPIO4 with divider ratio 3.0.
-- Display QSPI pins are 9–14 and reset is 21.
-- Touch/QMI8658 shared I2C is SDA47/SCL48. Do not reassign or initialize the IMU
-  as part of unrelated changes.
+- Target: headless ESP32-S3 PCB, built for an N16R8 module (16 MB flash/8 MB
+  PSRAM). There is no display or touch controller; do not reintroduce
+  display/touch code or the GFX/LVGL libraries.
+- Pressure ADC is GPIO2. Battery ADC is GPIO4 with divider ratio 3.0. Both must
+  stay on ADC1 because ADC2 is unavailable while Wi-Fi runs.
+- QMI8658 I2C is SDA47/SCL48 and its INT1 wake line is GPIO8 (an RTC GPIO, used
+  for ext0 deep-sleep wake). Do not reassign or initialize the IMU as part of
+  unrelated changes. A missing IMU must only disable auto-standby.
+- The optional local pulse LED is `PULSE_LED_PIN` in `include/config.h`
+  (`-1` = disabled). Never place it on strapping pins 0, 3, 45 or 46.
 - The pressure sensor expects nominal 0.2–2.7 V for 0–40 kPa and startup auto-zero.
-- ETA6098 `STAT` is not routed to an ESP32 GPIO on this board. Do not claim exact
+- The firmware does not read the ETA6098 `STAT` output. Do not claim exact
   charger detection from software. Preserve the charge estimator's 82 kOhm
   ISET/500 mA, 1500 mAh CC/CV model and fast USB-removal/OCV correction.
 - `slave1_wifi` is logical device 1, GPIO2 active-high in its default environment.
@@ -29,15 +35,16 @@ requests a hardware migration.
 
 ## Timing and concurrency invariants
 
-- UI is the priority workload: UI task stays pinned to Core 1 at 30 Hz.
-- Sensor, Wi-Fi, BLE, and Arduino loop work stay non-blocking on Core 0.
+- The 500 Hz pressure sensor task is the priority workload. Sensor, Wi-Fi, BLE,
+  and Arduino loop work stay non-blocking on Core 0.
 - Do not add flash/NVS writes, network calls, scanning, or long serial output to
-  the UI task.
+  the sensor task. Runtime BLE settings stay RAM-only.
 - Do not add busy loops. FreeRTOS tasks must block/yield.
-- `sendPulseTrigger()` schedules local UI pulses only; it must not send a packet
-  on every beat.
+- `sendPulseTrigger()` schedules the local pulse LED only; it must not send a
+  packet on every beat.
 - V3 physical slaves retain the latest trigger state and generate BPM locally.
-  Their first beat and the UI use the same scheduled execution timestamp.
+  Their first beat and the local pulse LED use the same scheduled execution
+  timestamp.
 - One synchronized receiver is sufficient. Wi-Fi and BLE delivery are independent;
   never gate either transport on a second slave being connected.
 - Send `TriggerStatePacket` immediately when BPM/zone/delay changes or after a

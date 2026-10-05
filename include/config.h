@@ -45,19 +45,14 @@
 #define LARGE_PULSE_DURATION_US 100000
 #define ECG_SAMPLE_INTERVAL_MS 16
 #define EVENT_QUEUE_SIZE 16
-#define UI_FRAME_INTERVAL_MS 16
-#define UI_STATUS_INTERVAL_MS 500
 #define ENABLE_VERBOSE_TIMING_LOGS 0
 
-#define PIN_NUM_LCD_CS 9
-#define PIN_NUM_LCD_PCLK 10
-#define PIN_NUM_LCD_DATA0 11
-#define PIN_NUM_LCD_DATA1 12
-#define PIN_NUM_LCD_DATA2 13
-#define PIN_NUM_LCD_DATA3 14
-#define PIN_NUM_LCD_RST 21
-#define PIN_NUM_TOUCH_SCL 48
-#define PIN_NUM_TOUCH_SDA 47
-#define DISPLAY_WIDTH 466
-#define DISPLAY_HEIGHT 466
-#define LCD_BUS_SPEED 80000000
+// Ekransiz master: istege bagli yerel nabiz LED'i. Her sentetik nabizda,
+// slave'lerin kullandigi ayni planlanmis zamanda 150 ms yanar. -1 kapali.
+// PCB'de bos ve strapping olmayan bir GPIO secin (0, 3, 45, 46 olmaz).
+#ifndef PULSE_LED_PIN
+#define PULSE_LED_PIN -1
+#endif
+#ifndef PULSE_LED_ACTIVE_LEVEL
+#define PULSE_LED_ACTIVE_LEVEL HIGH
+#endif

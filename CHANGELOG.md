@@ -1,5 +1,26 @@
 # Changelog
 
+## 5.0.0 - 2026-10-05 (ekransiz / headless)
+
+- Master'i ekransiz ozel ESP32-S3 PCB'ye tasir. CO5300 AMOLED surucusu, 30 Hz
+  UI gorevi, framebuffer, tema ve dokunmatik (FT3168/FT6146) kodu kaldirilir;
+  `GFX Library for Arduino` ve `lvgl` bagimliliklari projeden cikar.
+- Ekrandaki nabiz LED'inin yerine istege bagli bir GPIO LED'i gelir
+  (`PULSE_LED_PIN`, varsayilan `-1` kapali). LED, slave'lerin ilk fazini
+  belirleyen ayni planlanmis `executeAt` zamaninda 150 ms yanar; 500 Hz sensor
+  gorevinde surulur, aralik disinda, OTA sirasinda ve standby girisinde sonuk kalir.
+- Ekrandaki `W:`/`B:` baglanti seridi seri durum satirina tasinir
+  (`wifi=OK|SYNC|OFF ble=OK|SYNC|OFF`); `ui_fps`, `ui_age`, `ui_max` ve `fake`
+  alanlari kaldirilir, sentetik nabzin aktif oldugunu gosteren `pulse=` eklenir.
+- QMI8658 hareketle uyandirma korunur; I2C hatti artik yalnizca IMU icindir
+  (GPIO47/48, INT1 GPIO8). IMU bulunamazsa yalnizca otomatik standby kapanir.
+  Standby'da saklanan RTC ayarlarindan tema alani cikar ve magic degeri degisir.
+- PlatformIO ortamlari `esp32-s3-headless` ve `esp32-s3-headless-ota` olarak
+  yeniden adlandirilir; BLE OTA aracinin varsayilan `firmware.bin` yolu buna
+  gore guncellenir.
+- Basinc sensoru, batarya tahmini, Version 3 state trigger paket sozlesmesi,
+  BLE/Wi-Fi davranisi ve slave yazilimlari degismez.
+
 ## 4.1.0 - 2026-09-15
 
 - Sarj sirasinda gosterilen batarya yuzdesine olculmus bir sarj/dinlenmis

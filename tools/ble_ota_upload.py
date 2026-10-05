@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "firmware",
         nargs="?",
-        default=".pio/build/esp32-s3-touch-amoled-1-43/firmware.bin",
+        default=".pio/build/esp32-s3-headless/firmware.bin",
         help="PlatformIO firmware.bin yolu",
     )
     parser.add_argument("--name", default=DEVICE_NAME, help="BLE cihaz adi")

@@ -1,7 +1,7 @@
 #include "ui.h"
 
-// The combined blood-pressure UI draws connection state directly on its
-// Arduino_GFX canvas. These keep the reused transport module API compatible.
+// The headless master has no UI; connection state goes to the serial status
+// line. These no-op hooks keep the reused transport module API compatible.
 bool uiBegin() { return true; }
 void uiTick() {}
 void uiSchedulePulse(PulseType, uint64_t, int64_t, uint32_t) {}

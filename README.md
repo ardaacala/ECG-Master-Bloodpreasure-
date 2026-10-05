@@ -1,12 +1,24 @@
-# State based Trigger BLE Master Software — Version 4.1.0
+# State based Trigger BLE Master Software — Version 5.0.0 (ekransız)
 
-Waveshare ESP32-S3 Touch AMOLED 1.43 (466×466) için PlatformIO tabanlı tansiyon
-simülatörü/master firmware'i. Ekrandaki kadran, sentetik nabız salınımı, Wi-Fi
-slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
+Ekransız, özel ESP32-S3 PCB için PlatformIO tabanlı tansiyon simülatörü/master
+firmware'i. Sentetik nabız, isteğe bağlı yerel nabız LED'i, Wi-Fi slave ve BLE
+slave aynı planlanmış tetikleme zamanını kullanır. Durum bilgisi seri port ve
+BLE üzerinden okunur.
 
-> Bu depo `v4.0.0` ile aynı donanım düzenini hedefler; `v4.1.0` donanımda
-> değişiklik getirmez. 1.91 inç veya farklı pin dizilimli kartlara doğrudan
-> yüklenmemelidir.
+> Bu branch, Waveshare ESP32-S3 Touch AMOLED 1.43 için yazılmış `v4.1.0`
+> sürümünün ekransız türevidir. Ekranlı kart için `main` branch'i ve `v4.1.0`
+> etiketini kullanın.
+
+## Version 5.0.0 ekransız master
+
+- AMOLED ekran, 30 Hz UI görevi, framebuffer, tema ve dokunmatik kodu kaldırıldı.
+  `GFX Library for Arduino` ve `lvgl` artık bağımlılık değildir.
+- Ekrandaki nabız LED'inin yerini isteğe bağlı bir GPIO LED'i alır
+  (`PULSE_LED_PIN`). LED, slave'lerin ilk fazıyla aynı planlanmış zamanda
+  150 ms yanar.
+- Ekrandaki `W:`/`B:` bağlantı şeridi seri durum satırına taşındı.
+- Basınç ölçümü, batarya tahmini, hareketle uyku/uyanma, Wi-Fi/BLE OTA ve
+  Version 3 state trigger sözleşmesi değişmedi; slave'ler aynı firmware ile çalışır.
 
 ## Version 4.1.0 şarj farkındalıklı batarya göstergesi
 
@@ -24,17 +36,6 @@ slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 - CC/CV zaman modeli ve hızlı USB-çıkarma davranışı korunur; harita yalnızca
   tavan koyar, 4100 mV üzerinde sabit gerilim aşaması başladığı için bırakılır.
 - Version 3 state trigger paket sözleşmesi ve slave davranışı değişmez.
-
-## Version 4.0.0 tam ekran UI
-
-- İbre, bağlantı durumu, LED ve batarya göstergesi her karede tek framebuffer
-  içinde birleştirilir; üst üste gelen dinamik elemanların bıraktığı dikdörtgen
-  ve hayalet izler önlenir.
-- 466×466 RGB565 framebuffer panele doğrudan aktarılır. 8192 piksellik QSPI
-  blokları ve tek geçişli byte sıralamasıyla ölçülen tam-ekran hızı yaklaşık
-  13 FPS'den 14–15 FPS'ye çıkarılmıştır.
-- Değişiklik yalnızca master ekran aktarım yolundadır; Version 3 state trigger
-  paket sözleşmesi ve slave davranışı korunur.
 
 ## Version 3 state trigger protokolü
 
@@ -61,44 +62,67 @@ Paket yerlesimi, tekrar/ACK kurallari ve slave gelistirme notlari
 
 ## Temel özellikler
 
-- 30 Hz AMOLED arayüzü; UI görevi Core 1'de, radyo ve ADC işleri Core 0'da.
-- UI her karede tek bir tamamlanmış 466x466 framebuffer aktarır; ibre, LED,
-  bağlantı ve batarya katmanları arasında kirli-dikdörtgen çakışması oluşmaz.
-- Tam-kare QSPI aktarımı 8192 piksellik bloklarla yapılır. Framebuffer RGB565
-  byte sırası tek geçişte hazırlanıp panele doğrudan gönderilir; sürücünün her
-  blokta ikinci kez kopyalayıp dönüştürmesi önlenir.
-- Arayüz panel montajına uygun olarak 90° saat yönünün tersine döndürülür;
-  dokunmatik koordinatları da aynı görünür yöne çevrilir.
-- Ayrıntılı kadranda 2,5 mmHg alt çizgiler ve küçük vektör rakamlarla
-  `0, 20, 40...300` etiketleri bulunur; `10, 30, 50...` ara onlukları belirgin
-  fakat kısa tiklerle ayrılır ve rakamlarla arasında boşluk bırakılır. Kadran ekranın kırpılmadan desteklediği maksimum yarıçapı
-  kullanır. İbre bütün dinamik UI katmanlarının üzerinde çizilir. SimClever logosu üst-ortada,
-  Wi-Fi/BLE durumu merkez altında ve büyük batarya göstergesi alt kenardadır.
+- Ekran yok: basınç 500 Hz örneklenir, sensör görevi ve radyo işleri Core 0'da
+  bloklamadan çalışır. Durum seri port ve BLE üzerinden okunur.
 - Gerçek nabız araması kapalı; yalnızca ayarlanabilir sentetik BPM kullanılır.
-- Sentetik salınım tepe değeri `1.5 mmHg`; fiziksel LED ve UI LED'iyle aynı anda başlar.
+- İsteğe bağlı yerel nabız LED'i, fiziksel slave çıkışlarıyla aynı planlanmış
+  zamanda yanar.
 - BPM aralığı 30–240, tekrar tetikleme koruması 200 ms.
 - Sentetik nabız yalnızca diyastolik ve sistolik basınç sınırları arasında çalışır.
 - Basınç sensöründeki süreksiz sıçramaları 5 örnek median ve yaklaşık 20 ms
-  süreklilik doğrulamasıyla UI ve trigger sınırlarına ulaşmadan engeller.
+  süreklilik doğrulamasıyla trigger sınırlarına ulaşmadan engeller.
 - Wi-Fi ve BLE slave'lere ortak, ileri tarihli tetikleme zamanı gönderilir.
 - Telefonda BLE üzerinden BPM ve basınç aralığı ayarlanabilir.
-- Açık/koyu tema ve 2 saniye basılı tutarak ekran açma/kapatma.
-- Filtreli batarya voltajı ve lookup-table tabanlı yüzde göstergesi.
+- Filtreli batarya voltajı ve lookup-table tabanlı yüzde tahmini (seri port ve
+  BLE Battery Service).
 - Parola korumalı Wi-Fi OTA firmware yükleme desteği.
 - PC'den parola kontrollü BLE OTA firmware yükleme desteği.
 - QMI8658 hareket algılamasıyla 5 dakika hareketsizlikte otomatik düşük güç bekleme.
 
 ## Donanım ve pinler
 
-| İşlev | Pin / bilgi |
-|---|---|
-| Harici basınç sensörü ADC | GPIO2 |
-| Kart üzeri BAT_ADC | GPIO4, kart üzerindeki bölücü oranı ×3 |
-| Dokunmatik / QMI8658 I²C SDA | GPIO47 |
-| Dokunmatik / QMI8658 I²C SCL | GPIO48 |
-| Dokunmatik adresi | `0x38` |
-| AMOLED QSPI | CS 9, CLK 10, D0–D3 11–14, RST 21 |
-| Seri monitör | 115200 baud, USB CDC |
+Derleme profili ESP32-S3 **N16R8** modülünü (16 MB QIO flash, 8 MB octal PSRAM,
+3.3 V) hedefler. Farklı bir modül kullanılacaksa
+[`platformio.ini`](platformio.ini) içindeki kart, bellek tipi, flash boyutu ve
+bölüm tablosu da değiştirilmelidir.
+
+| İşlev | Pin | Yön | Not |
+|---|---|---|---|
+| Harici basınç sensörü | GPIO2 | Analog giriş | ADC1_CH1, 11 dB. 0.2–2.7 V = 0–40 kPa, 500 Hz |
+| Pil gerilimi (BAT_ADC) | GPIO4 | Analog giriş | ADC1_CH3. Bölücü oranı **×3** (`BATTERY_DIVIDER_RATIO`) |
+| QMI8658 I²C SDA | GPIO47 | Çift yönlü | 400 kHz, 3.3 V'a pull-up gerekir |
+| QMI8658 I²C SCL | GPIO48 | Çıkış | 400 kHz, 3.3 V'a pull-up gerekir |
+| QMI8658 `INT1` | GPIO8 | Dijital giriş | Aktif-yüksek, deep sleep'ten uyandırma (RTC GPIO) |
+| Yerel nabız LED'i (isteğe bağlı) | `PULSE_LED_PIN` | Dijital çıkış | Varsayılan `-1` (kapalı) |
+| USB D− / D+ | GPIO19 / GPIO20 | USB | Yükleme ve seri monitör, 115200 baud, USB CDC |
+
+PCB notları:
+
+- İki analog giriş ADC1'de kalmalıdır; ADC2, Wi-Fi açıkken kullanılamaz.
+- GPIO26–32 flash'a, GPIO33–37 octal PSRAM'e ayrılmıştır. GPIO0, 3, 45 ve 46
+  strapping pinleridir; LED veya başka bir çıkış için kullanmayın.
+- GPIO47/48 modülün VDD_SPI besleme alanındadır. 1.8 V'luk flash/PSRAM'li
+  modüllerde bu pinler 1.8 V olur; 3.3 V'luk bir modül seçin.
+- QMI8658 takılmazsa firmware çalışmaya devam eder, yalnızca otomatik standby
+  devre dışı kalır.
+- Pil şarj tahmini ETA6098, 82 kΩ ISET (500 mA) ve 1500 mAh hücre varsayar;
+  farklı şarj devresi veya pilde ilgili `BATTERY_*` sabitleri güncellenmelidir.
+
+### Yerel nabız LED'i
+
+Ekransız sürümde sentetik nabzı yerinde görmek için bir LED bağlanabilir. Boş,
+strapping olmayan bir GPIO seçin (örneğin GPIO5) ve
+[`include/config.h`](include/config.h) içinde ayarlayın:
+
+```cpp
+#define PULSE_LED_PIN 5
+#define PULSE_LED_ACTIVE_LEVEL HIGH
+```
+
+LED her sentetik nabızda, slave'lerin ilk fazını belirleyen aynı planlanmış
+`executeAt` zamanında 150 ms yanar. Basınç DIA–SYS aralığı dışındayken, OTA
+sırasında ve standby girişinde sönük kalır. Akım sınırlama direnci kullanın;
+yüksek akımlı bir yük için araya transistör veya MOSFET koyun.
 
 Aktif topoloji:
 
@@ -133,20 +157,16 @@ kendi kartlarına yüklenmelidir. Master yalnızca `BLE_NODE_NAME` ile eşleşen
 fiziksel slave'e bağlanır; telefon kontrol uygulamasının gördüğü master reklam
 adı ise bundan bağımsız olarak `BP_TRIGGER_MASTER` kalır.
 
-GPIO47/48, dokunmatik ve QMI8658 tarafından paylaşılan kart içi I²C hattıdır.
-QMI8658'in kartta bağlı `INT1` çıkışı GPIO8'e gider.
-
 ## Harekete duyarlı bekleme modu
 
 QMI8658, normal çalışmada fiziksel hareketi 10 Hz düşük güçlü ivme örnekleriyle
-izler; ekran dokunuşu da kullanıcı aktivitesi sayılır. Her fiziksel hareket veya
-dokunma beş dakikalık sayacı baştan başlatır. Son aktiviteden itibaren beş dakika
-geçerse yeni tetikler engellenir,
-ekran uyutulur ve ESP32-S3 deep sleep'e girer; bu durumda iki CPU çekirdeği ile
-Wi-Fi/BLE radyo alanları kapalıdır. Yalnızca QMI8658'in 21 Hz düşük güç
-ivmeölçeri çalışır. Hareket, QMI8658 `INT1` -> GPIO8 hattıyla kartı uyandırır
-ve normal çalışma yeniden başlar. BLE'den girilen BPM/basınç aralığı ve tema
-RTC belleğinde tutulduğu için bu uyanmada kaybolmaz.
+izler. Her fiziksel hareket beş dakikalık sayacı baştan başlatır. Son hareketten
+itibaren beş dakika geçerse yeni tetikler engellenir, yerel nabız LED'i söner
+ve ESP32-S3 deep sleep'e girer; bu durumda iki CPU çekirdeği ile Wi-Fi/BLE
+radyo alanları kapalıdır. Yalnızca QMI8658'in 21 Hz düşük güç ivmeölçeri
+çalışır. Hareket, QMI8658 `INT1` -> GPIO8 hattıyla kartı uyandırır ve normal
+çalışma yeniden başlar. BLE'den girilen BPM/basınç aralığı RTC belleğinde
+tutulduğu için bu uyanmada kaybolmaz.
 
 Jiroskop, QMI8658'in düşük güç ivmeölçer modunda donanım gereği kapalıdır.
 Bu, aynı hareketle uyanma işlevini daha az batarya tüketimiyle sağlar. IMU
@@ -165,8 +185,8 @@ Telefon uygulaması UTF-8 metni `CONTROL_RX_UUID` karakteristiğine yazar:
 
 Sınırlar: BPM 30–240, sistolik 31–300, diyastolik 1–sistolik-1.
 UUID'ler [include/protocol.h](include/protocol.h) içindedir. Çalışma sırasında
-gelen BLE ayarları bilerek yalnızca RAM'de tutulur; flash yazısının UI'ı
-dondurması önlenir.
+gelen BLE ayarları bilerek yalnızca RAM'de tutulur; flash yazısının 500 Hz
+basınç örneklemesini duraklatması önlenir.
 
 Master batarya yüzdesi ayrıca standart BLE Battery Service `0x180F` içindeki
 Battery Level `0x2A19` karakteristiğinden tek bayt `0..100` olarak okunabilir.
@@ -230,7 +250,7 @@ PowerShell üzerinden kablosuz yükleme:
 
 ```powershell
 $env:PLATFORMIO_UPLOAD_FLAGS="--auth=BURAYA_OTA_PAROLASI"
-python -m platformio run -e esp32-s3-touch-amoled-1-43-ota -t upload
+python -m platformio run -e esp32-s3-headless-ota -t upload
 Remove-Item Env:PLATFORMIO_UPLOAD_FLAGS
 ```
 
@@ -242,16 +262,15 @@ kesilmemesi için bilgisayarın `ECG_MASTER` ağından ayrılmaması gerekir.
 
 BLE OTA destekli firmware ilk kez USB ile yüklenmelidir. Sonraki güncellemelerde
 bilgisayarın Bluetooth'u üzerinden, Wi-Fi ağına bağlanmadan yükleme yapılabilir.
-Cihaz beş dakikalık hareketsizlik uykusundaysa önce hareket ettirerek veya ekrana
-dokunarak uyandırın.
+Cihaz beş dakikalık hareketsizlik uykusundaysa önce hareket ettirerek uyandırın.
 
 ```powershell
-python -m platformio run -e esp32-s3-touch-amoled-1-43
+python -m platformio run -e esp32-s3-headless
 python tools/ble_ota_upload.py
 ```
 
 Araç varsayılan olarak
-`.pio/build/esp32-s3-touch-amoled-1-43/firmware.bin` dosyasını ve
+`.pio/build/esp32-s3-headless/firmware.bin` dosyasını ve
 `BP_TRIGGER_MASTER` cihazını kullanır. Bir başka dosya veya parola için:
 
 ```powershell
@@ -263,8 +282,8 @@ Remove-Item Env:BP_BLE_OTA_PASSWORD
 Yalnızca `firmware.bin` kullanın; birleşik `firmware.factory.bin` BLE OTA için
 uygun değildir. Aktarım her parçayı cihazdan ACK aldıktan sonra ilerletir; toplam
 boyut, paket sırası, CRC32 ve ESP firmware imzası doğrulanmadan yeni bölüm boot
-edilmez. Aktarım sırasında trigger üretimi, BLE slave taraması ve otomatik standby
-geçici olarak durur; UI Core 1'de 30 Hz çalışmaya devam eder.
+edilmez. Aktarım sırasında trigger üretimi, yerel nabız LED'i, BLE slave taraması
+ve otomatik standby geçici olarak durur.
 
 BLE OTA parolası `BLE_OTA_PASSWORD` ile ayrı tanımlanabilir; tanımlanmazsa
 `OTA_PASSWORD` kullanılır. Bu parola yakındaki yanlışlıkla yapılan yüklemeleri
@@ -272,15 +291,29 @@ engeller ancak mevcut bağlantı eşleştirme/şifreleme zorunlu tutmadığı i�
 kriptografik kimlik doğrulama değildir. Güncellemeyi güvenilen fiziksel ortamda
 yapın ve özel kurulumlarda ignored `include/secrets.h` ile benzersiz parola seçin.
 
-## Ekran hareketleri
+## Seri durum satırı
 
-- Açık temada sağdan sola kaydırma: koyu tema.
-- Koyu temada soldan sağa kaydırma: açık tema.
-- Ekrana 2 saniye basılı tutma: ekranı aç/kapat.
+Ekran olmadığı için durum, USB CDC seri portunda (115200 baud) her 500 ms'de bir
+yazdırılır. Başlangıçtaki otomatik sıfırlama bitene kadar bu satır gelmez;
+manşet sıfırlama sırasında boş olmalıdır. Satırın biçimi (değerler örnektir):
+
+```text
+[SENSOR] adc=412 delta=3 mV=205 zero_mV=203 mmHg=0.15 sat=0 sps=500 bpm=72 range=60-130 pulse=0 wifi=OK ble=SYNC bat=3912mV/66% charge_est=0
+```
+
+| Alan | Anlamı |
+|---|---|
+| `adc`, `delta`, `mV`, `zero_mV` | Ham ADC, sıfıra göre fark, kalibre mV ve başlangıçta öğrenilen sıfır |
+| `mmHg`, `sat` | Temizlenmiş basınç ve ADC doygunluğu |
+| `sps` | Ölçülen örnekleme hızı; 500 civarında olmalıdır |
+| `bpm`, `range` | Sentetik BPM ve DIA–SYS aralığı |
+| `pulse` | `1`: basınç aralıkta, sentetik nabız aktif |
+| `wifi`, `ble` | `OK` senkron, `SYNC` bağlı fakat senkron değil, `OFF` bağlı değil |
+| `bat`, `charge_est` | Pil gerilimi/yüzdesi ve şarj tahmini aktifliği |
 
 ## Batarya ölçümü
 
-GPIO4, kart üzerindeki BAT_ADC direnç bölücüsünü okur. Her ölçüm grubu için 32
+GPIO4, BAT_ADC direnç bölücüsünü okur. Her ölçüm grubu için 32
 örnek 20 ms aralıklarla alınır; böylece basınç sensörü tek seferde bloke edilmez.
 ×3 bölücü katsayısı ve düşük geçiren filtre uygulanır. Yüzde doğrusal `map()`
 ile değil, 3.20–4.20 V Li-Po eğrisi üzerinde
@@ -291,14 +324,14 @@ haritasıyla telafi edilir.
 ### Feature: Battery level while charging fix
 
 `v2.1.0` sürümünde BAT_ADC voltajındaki ani
-yukarı sıçrama doğrudan yüzde artışı kabul edilmez. Kart şemasındaki ETA6098
+yukarı sıçrama doğrudan yüzde artışı kabul edilmez. Referans şemadaki ETA6098
 `ISET` direnci 82 kΩ'dur ve şarj akımını 500 mA'e ayarlar. Yazılım, kablo
 takılmadan önceki lookup-table SOC değerini korur; yükseliş üç ardışık ölçümle
 doğrulanınca 1500 mAh kapasite, %98 hücre coulombic verimi ve CC/CV son-dolum
 yavaşlamasıyla SOC'yi zaman üzerinden ilerletir. Böylece şarj sırasında görülen
 4.20 V, gerçek batarya hemen dolmuş gibi yorumlanmaz. USB çıkarıldığında 70 mV veya daha büyük
 düşüş hızlı uygulanır ve tekrar batarya-only voltaj eğrisine dönülür. Tahmini
-şarj durumu aktifken batarya yüzdesinin yanında `CHG` gösterilir.
+şarj durumu aktifken seri durum satırında `charge_est=1` görünür.
 
 Modeldeki `BATTERY_CAPACITY_MAH`, `BATTERY_CHARGE_CURRENT_MA` ve
 `BATTERY_CHARGE_COULOMBIC_EFFICIENCY` sabitleri farklı pil veya ölçülmüş şarj süresine göre
@@ -387,15 +420,19 @@ artış hızı eşiğin altında kalır ve bu yol tetiklenmez. Orada sapma zaten
 — ham eğri %94, gerçek ~%89. Kesin çözüm için VBUS veya `STAT` hattının bir
 GPIO'ya bağlanması gerekir.
 
-Kartın ETA6098 `STAT` çıkışı ESP32 GPIO'suna bağlı olmadığı için yazılım yalnızca
-BAT_ADC ile şarj kablosunu kesin olarak algılayamaz. Sistem USB zaten takılıyken
-soğuk açılırsa geçmiş bir batarya-only referansı yoktur. Yukarıdaki sürekli
-yükseliş tespiti bu durumu 10–15 dakika içinde telafi eder, fakat anlık ve kesin
-bir cevap ancak ayrı bir VBUS/STAT bağlantısıyla mümkündür.
+Firmware ETA6098 `STAT` çıkışını okumaz; yazılım yalnızca BAT_ADC ile şarj
+kablosunu kesin olarak algılayamaz. Sistem USB zaten takılıyken soğuk açılırsa
+geçmiş bir batarya-only referansı yoktur. Yukarıdaki sürekli yükseliş tespiti bu
+durumu 10–15 dakika içinde telafi eder, fakat anlık ve kesin bir cevap ancak ayrı
+bir VBUS/STAT bağlantısıyla mümkündür. Yeni PCB'de bu hatlardan biri boş bir
+GPIO'ya bağlanırsa, kullanılabilmesi için ayrıca firmware desteği gerekir.
 
 ## Proje yapısı
 
-- `src/main.cpp`: ADC, sahte nabız, UI, dokunmatik ve görev dağılımı.
+- `src/main.cpp`: ADC, sahte nabız, yerel nabız LED'i, hareketle uyku, seri
+  durum satırı ve görev dağılımı.
+- `src/ui_compat.cpp`: Wi-Fi modülünün eski UI çağrıları için boş uyumluluk
+  fonksiyonları.
 - `src/wifi_master.cpp`: Wi-Fi AP, TCP slave ve saat senkronizasyonu.
 - `src/ble_master.cpp`: BLE slave ve telefon GATT kontrolü.
 - `src/ble_ota_service.cpp`: PC BLE OTA protokolü ve Core 0 flash yazma görevi.

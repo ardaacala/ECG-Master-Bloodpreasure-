@@ -1,9 +1,8 @@
-/* Live cuff-pressure gauge for a conditioned 0-40 kPa analog sensor.
- * Sensor output: nominally 0.2-2.7 V at a 3.3 V supply. */
+/* Headless cuff-pressure trigger master for a conditioned 0-40 kPa analog
+ * sensor. Sensor output: nominally 0.2-2.7 V at a 3.3 V supply. There is no
+ * display or touch controller; status is reported over serial and BLE. */
 #include <Arduino.h>
-#include <Arduino_GFX_Library.h>
 #include <Wire.h>
-#include "esp_heap_caps.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
 #include <Preferences.h>
@@ -14,12 +13,12 @@
 #include "ble_ota_service.h"
 #include "ota_service.h"
 
-// The active 466x466 round Waveshare board routes its onboard BAT_ADC divider
-// to GPIO4. The external conditioned pressure sensor remains on GPIO2.
+// The battery divider feeds GPIO4 and the external conditioned pressure sensor
+// feeds GPIO2. Both are ADC1 channels, which keep working while Wi-Fi is up.
 constexpr uint8_t BATTERY_ADC_PIN = 4;
 constexpr uint8_t PRESSURE_ADC_PIN = 2;
-// Waveshare's official ADC example for this 1.43-inch board reads ADC1
-// channel 3 (GPIO4) and multiplies the ADC-side voltage by 3.
+// ADC1 channel 3 (GPIO4) sees one third of the cell voltage, as on the
+// original Waveshare board; change this together with the PCB divider.
 constexpr float BATTERY_DIVIDER_RATIO = 3.0f;
 constexpr uint32_t BATTERY_UPDATE_MS = 5000;
 constexpr uint8_t BATTERY_SAMPLE_COUNT = 32;
@@ -78,24 +77,18 @@ constexpr float SENSOR_FULL_SCALE_MMHG =
 // and 20 mmHg around 100 mmHg. A gain correction preserves the zero point and
 // avoids the discontinuity that a +10/+20 piecewise offset would create.
 constexpr float PRESSURE_GAIN_CORRECTION = 1.20f;
-constexpr float GAUGE_MAX_MMHG = 300.0f;
+constexpr float PRESSURE_MAX_MMHG = 300.0f;
 constexpr uint16_t ADC_SAMPLE_HZ = 500;
 constexpr uint32_t ADC_SAMPLE_PERIOD_US = 1000000UL / ADC_SAMPLE_HZ;
 constexpr uint8_t PRESSURE_MEDIAN_WINDOW = 5;
 constexpr float PRESSURE_SPIKE_STEP_MMHG = 2.5f;
 constexpr float PRESSURE_SPIKE_RETURN_MMHG = 1.0f;
 constexpr uint8_t PRESSURE_SPIKE_CONFIRM_SAMPLES = 8;
-constexpr uint16_t UI_REFRESH_HZ = 30;
-constexpr uint32_t UI_FRAME_PERIOD_US = 1000000UL / UI_REFRESH_HZ;
 constexpr uint16_t PULSE_LED_ON_MS = 150;
 // Ignore brief ADC excursions around the configured pressure boundaries.
 // The beat timeline keeps running during this window, so boundary noise
 // cannot turn 30 BPM into rapid restarts or make 200 BPM appear very slow.
 constexpr uint16_t FAKE_RANGE_EXIT_DEBOUNCE_MS = 300;
-// The measured cuff oscillations are typically only a few tenths of a mmHg.
-// Keep the simulator in that range instead of drawing an exaggerated 2 mmHg
-// pressure excursion.
-constexpr float FAKE_PULSE_AMPLITUDE_MMHG = 1.5f;
 constexpr uint16_t DEFAULT_FAKE_BPM = 72;
 constexpr uint16_t DEFAULT_FAKE_MAX_PRESSURE_MMHG = 130;
 constexpr uint16_t DEFAULT_FAKE_MIN_PRESSURE_MMHG = 30;
@@ -107,29 +100,18 @@ constexpr uint16_t DEFAULT_FAKE_MIN_PRESSURE_MMHG = 30;
 constexpr uint32_t MIN_TRIGGER_INTERVAL_MS = 200;
 // A changing transport lead shifts executeAt between beats and can make a
 // valid beat collide with the global duplicate guard. Use one conservative
-// lead for every event so the physical/UI cadence remains exactly BPM-based.
+// lead for every event so the physical/LED cadence remains exactly BPM-based.
 constexpr uint32_t FIXED_TRIGGER_LEAD_US = 600000;
 // A cuff oscillation can contain a reflected/dicrotic second positive lobe.
 // Keep the real detector refractory long enough not to count that lobe as a
 // second heartbeat. 500 ms still supports heart rates up to 120 BPM.
 constexpr uint16_t WARMUP_SAMPLE_COUNT = 125;
 constexpr uint16_t ZERO_SAMPLE_COUNT = 250;
-constexpr uint8_t LCD_CS = 9, LCD_PCLK = 10, LCD_D0 = 11, LCD_D1 = 12;
-constexpr uint8_t LCD_D2 = 13, LCD_D3 = 14, LCD_RST = 21;
-// FT3168/FT6146 touch controller and QMI8658 share this onboard I2C bus.
-// Both are accessed from Arduino loop/Core 0 so their transactions cannot
-// collide with the priority UI task on Core 1.
-constexpr uint8_t TOUCH_SDA_PIN = 47, TOUCH_SCL_PIN = 48;
-constexpr uint8_t TOUCH_I2C_ADDRESS = 0x38;
-constexpr uint16_t TOUCH_POLL_INTERVAL_MS = 25;
-constexpr uint16_t TOUCH_RETRY_INTERVAL_MS = 2000;
-constexpr uint8_t TOUCH_FAILURE_LIMIT = 3;
-constexpr int16_t SWIPE_MIN_DISTANCE = 70;
-constexpr uint16_t SWIPE_MAX_DURATION_MS = 1000;
-constexpr uint16_t SCREEN_HOLD_TOGGLE_MS = 2000;
-// QMI8658 INT1 is routed to GPIO8 on this exact board. Wake-on-Motion uses
-// the accelerometer's low-power engine; the gyroscope must stay disabled for
-// that mode according to the sensor data sheet.
+// QMI8658 I2C bus. It is accessed only from the Arduino loop on Core 0.
+constexpr uint8_t IMU_SDA_PIN = 47, IMU_SCL_PIN = 48;
+// QMI8658 INT1 must reach GPIO8, an RTC GPIO, so it can wake deep sleep.
+// Wake-on-Motion uses the accelerometer's low-power engine; the gyroscope
+// must stay disabled for that mode according to the sensor data sheet.
 constexpr uint8_t IMU_INT_PIN = 8;
 constexpr uint8_t QMI8658_ADDRESS_HIGH = 0x6B;
 constexpr uint8_t QMI8658_ADDRESS_LOW = 0x6A;
@@ -160,27 +142,17 @@ constexpr uint16_t IMU_ACTIVITY_SAMPLE_MS = 100;
 // remaining above the stationary low-power accelerometer noise floor.
 constexpr int32_t IMU_ACTIVITY_DELTA_LSB = 180;
 constexpr uint32_t STANDBY_TIMEOUT_MS = 5UL * 60UL * 1000UL;
-constexpr uint32_t STANDBY_SETTINGS_MAGIC = 0x42505332;
-constexpr int16_t SCREEN_W = 466, SCREEN_H = 466;
-// CO5300 cannot exchange X/Y axes in hardware. Arduino_Canvas writes logical
-// UI coordinates into an already counter-clockwise rotated framebuffer.
-constexpr uint8_t DISPLAY_ROTATION = 0;
-constexpr uint8_t CANVAS_ROTATION = 3;
+constexpr uint32_t STANDBY_SETTINGS_MAGIC = 0x42505333;
 
 struct StandbyRetainedSettings {
     uint32_t magic;
     uint16_t bpm;
     uint16_t systolicMmHg;
     uint16_t diastolicMmHg;
-    uint8_t darkTheme;
 };
 
 RTC_DATA_ATTR StandbyRetainedSettings standbyRetainedSettings = {};
 
-Arduino_DataBus *bus = nullptr;
-Arduino_GFX *display = nullptr;
-Arduino_Canvas *canvas = nullptr;
-uint16_t *backgroundPixels = nullptr;
 int64_t zeroRawSum = 0;
 int64_t zeroMilliVoltsSum = 0;
 int32_t zeroRaw = 0;
@@ -191,31 +163,17 @@ volatile int32_t latestRaw = 0;
 volatile uint32_t latestMilliVolts = 0;
 volatile bool adcSaturated = false;
 volatile float targetPressure = 0.0f;
-volatile float displayedGaugeBasePressure = 0.0f;
-volatile float fakePressureOffset = 0.0f;
 volatile uint16_t fakeBpm = DEFAULT_FAKE_BPM;
 volatile uint16_t fakeMaxPressureMmHg = DEFAULT_FAKE_MAX_PRESSURE_MMHG;
 volatile uint16_t fakeMinPressureMmHg = DEFAULT_FAKE_MIN_PRESSURE_MMHG;
 volatile uint32_t fakeBpmRevision = 0;
-// Incremented whenever a pressure boundary invalidates an already queued or
-// visible synthetic event. The UI consumes the event instead of showing it
-// later after the pressure/range changes.
-volatile uint32_t fakeUiCancelRevision = 0;
+// True while the synthetic beat is active: DIA < measured mmHg < SYS.
 volatile bool fakePulseMode = false;
-volatile uint32_t visiblePulseCount = 0;
 volatile uint16_t measuredSps = 0;
-volatile uint16_t measuredUiFps = 0;
-volatile uint32_t lastUiFrameMs = 0;
-volatile uint16_t maxUiDrawMs = 0;
 volatile uint16_t batteryVoltageMv = 0;
 volatile uint8_t batteryPercent = 0;
 volatile bool batteryReadingValid = false;
 volatile bool batteryChargingEstimated = false;
-volatile bool darkTheme = false;
-volatile uint32_t themeRevision = 0;
-volatile bool requestedScreenOn = true;
-volatile uint32_t screenPowerRevision = 0;
-bool touchAvailable = false;
 bool imuMotionWakeAvailable = false;
 uint8_t qmi8658Address = 0;
 uint32_t lastMotionActivityMs = 0;
@@ -224,7 +182,17 @@ uint32_t lastSerialMs = 0;
 uint32_t networkEventId = 0;
 int64_t lastTriggerExecuteAtUs = 0;
 portMUX_TYPE triggerMux = portMUX_INITIALIZER_UNLOCKED;
-TaskHandle_t uiTaskHandle = nullptr;
+
+void setPulseLed(bool on) {
+    // Only the sensor task drives the LED, so this cache needs no lock.
+    static int8_t appliedState = -1;
+    if (PULSE_LED_PIN < 0) return;
+    const int8_t requestedState = on ? 1 : 0;
+    if (requestedState == appliedState) return;
+    appliedState = requestedState;
+    digitalWrite(PULSE_LED_PIN,
+                 on ? PULSE_LED_ACTIVE_LEVEL : !PULSE_LED_ACTIVE_LEVEL);
+}
 
 uint8_t batteryPercentFromMillivolts(uint16_t millivolts) {
     struct BatteryPoint { uint16_t mv; uint8_t percent; };
@@ -292,7 +260,7 @@ bool batteryRestedMvFromChargingMv(uint16_t chargingMv, float *restedMvOut) {
     return false;
 }
 
-// Highest percentage the charge-time integrator is allowed to display for a
+// Highest percentage the charge-time integrator is allowed to report for a
 // given charge voltage. This is a ceiling, not the shown value: the reference
 // run rested each point for only 60 s, which leaves its 3.35-3.52 V rested
 // numbers reading somewhat high, and it is a single cell at room temperature.
@@ -330,7 +298,7 @@ float advanceBatteryChargeEstimate(float percent, uint32_t elapsedMs) {
 void updateBatteryMeasurement() {
     // Spread the 32 ADC conversions across ~640 ms. A former burst loop did
     // all conversions at once every five seconds and briefly stalled the
-    // pressure stream, which looked like a periodic gauge/UI freeze.
+    // pressure stream, which showed up as a periodic sampling freeze.
     static uint32_t adcMillivoltSum = 0;
     static uint8_t adcSampleCount = 0;
     static uint32_t nextBatchMs = 0;
@@ -608,7 +576,8 @@ bool sendPulseTrigger(PulseType pulseType = PULSE_LARGE,
     if (eventIdResult) *eventIdResult = eventId;
     // V3 physical outputs are generated locally by each slave from the
     // retained TriggerStatePacket. This function now schedules only the
-    // master's synchronized UI pulse and never floods transports per beat.
+    // master's synchronized local pulse LED and never floods transports per
+    // beat.
     if (ENABLE_VERBOSE_TIMING_LOGS) {
         Serial.printf("[LOCAL PULSE] #%lu at=%lld target=0x%llx type=%u\n",
                       (unsigned long)eventId, (long long)executeAtUs,
@@ -650,244 +619,13 @@ void updateTriggerState(float pressureMmHg, bool saturated) {
                   (long long)effectiveAtUs);
 }
 
-constexpr int16_t GAUGE_CX = SCREEN_W / 2;
-constexpr int16_t GAUGE_CY = SCREEN_H / 2;
-constexpr int16_t NEEDLE_RADIUS = 172;
-constexpr int16_t PULSE_LED_CX = GAUGE_CX;
-constexpr int16_t PULSE_LED_CY = 370;
-constexpr int16_t PULSE_LED_RADIUS = 14;
-constexpr int16_t STATUS_X = 138;
-constexpr int16_t STATUS_Y = 286;
-constexpr int16_t STATUS_W = 190;
-constexpr int16_t STATUS_H = 24;
-constexpr int16_t BATTERY_X = 151;
-// The UI is rotated during panel transfer. Y=404 maps the battery to the
-// visible edge while keeping all four corners inside the round AMOLED area.
-constexpr int16_t BATTERY_Y = 404;
-constexpr int16_t BATTERY_W = 164;
-constexpr int16_t BATTERY_H = 27;
-
-void pointOnGauge(float pressure, int16_t radius, int16_t &x, int16_t &y) {
-    pressure = constrain(pressure, 0.0f, GAUGE_MAX_MMHG);
-    const float angle = (120.0f + pressure) * DEG_TO_RAD;
-    x = GAUGE_CX + (int16_t)lroundf(cosf(angle) * radius);
-    y = GAUGE_CY + (int16_t)lroundf(sinf(angle) * radius);
-}
-
-void drawThickLine(Arduino_GFX *gfx, int16_t x0, int16_t y0,
-                   int16_t x1, int16_t y1, uint16_t color, uint8_t width) {
-    const float dx = x1 - x0, dy = y1 - y0;
-    const float length = sqrtf(dx * dx + dy * dy);
-    if (length < 1.0f) return;
-    const float ox = -dy / length, oy = dx / length;
-    const int half = width / 2;
-    for (int i = -half; i <= half; ++i) {
-        gfx->drawLine(x0 + lroundf(ox * i), y0 + lroundf(oy * i),
-                      x1 + lroundf(ox * i), y1 + lroundf(oy * i), color);
-    }
-}
-
-void drawPulseLed(Arduino_GFX *gfx, bool on) {
-    constexpr int16_t regionMargin = PULSE_LED_RADIUS + 4;
-    const uint16_t face = gfx->color565(darkTheme ? 5 : 244,
-                                        darkTheme ? 7 : 240,
-                                        darkTheme ? 9 : 230);
-    const uint16_t bezel = gfx->color565(24, 24, 24);
-    const uint16_t rim = gfx->color565(92, 92, 92);
-    const uint16_t offColor = gfx->color565(58, 8, 10);
-    const uint16_t onColor = gfx->color565(255, 24, 36);
-    const uint16_t highlight = gfx->color565(255, 178, 178);
-
-    // Clear the complete dirty rectangle first. Circle-only repainting left
-    // stale corner pixels after a rotated needle update and looked like drift.
-    gfx->fillRect(PULSE_LED_CX - regionMargin,
-                  PULSE_LED_CY - regionMargin,
-                  regionMargin * 2 + 1, regionMargin * 2 + 1, face);
-    gfx->fillCircle(PULSE_LED_CX, PULSE_LED_CY, PULSE_LED_RADIUS + 4, bezel);
-    gfx->fillCircle(PULSE_LED_CX, PULSE_LED_CY, PULSE_LED_RADIUS + 1, rim);
-    gfx->fillCircle(PULSE_LED_CX, PULSE_LED_CY, PULSE_LED_RADIUS,
-                    on ? onColor : offColor);
-    if (on) {
-        gfx->fillCircle(PULSE_LED_CX - 5, PULSE_LED_CY - 5, 4, highlight);
-    }
-}
-
-void drawNeedleLayer(Arduino_GFX *gfx, int16_t tipX, int16_t tipY) {
-    const uint16_t needleRed = gfx->color565(212, 21, 32);
-    const uint16_t hubDark = gfx->color565(90, 0, 0);
-    drawThickLine(gfx, GAUGE_CX, GAUGE_CY, tipX, tipY, needleRed, 5);
-    gfx->fillCircle(GAUGE_CX, GAUGE_CY, 15, hubDark);
-    gfx->fillCircle(GAUGE_CX, GAUGE_CY, 11, needleRed);
-}
-
-void drawGaugeDigit(Arduino_GFX *gfx, uint8_t digit,
-                    int16_t x, int16_t y, uint16_t color) {
-    static constexpr uint8_t segments[10] = {
-        0x3f, 0x06, 0x5b, 0x4f, 0x66,
-        0x6d, 0x7d, 0x07, 0x7f, 0x6f
-    };
-    if (digit > 9) return;
-    const uint8_t mask = segments[digit];
-    auto horizontal = [&](int16_t segmentY) {
-        gfx->drawLine(x + 2, segmentY,     x + 6, segmentY,     color);
-        gfx->drawLine(x + 2, segmentY + 1, x + 6, segmentY + 1, color);
-    };
-    auto vertical = [&](int16_t segmentX, int16_t startY) {
-        gfx->drawLine(segmentX,     startY, segmentX,     startY + 4, color);
-        gfx->drawLine(segmentX + 1, startY, segmentX + 1, startY + 4, color);
-    };
-    if (mask & 0x01) horizontal(y);
-    if (mask & 0x02) vertical(x + 7, y + 1);
-    if (mask & 0x04) vertical(x + 7, y + 7);
-    if (mask & 0x08) horizontal(y + 12);
-    if (mask & 0x10) vertical(x, y + 7);
-    if (mask & 0x20) vertical(x, y + 1);
-    if (mask & 0x40) horizontal(y + 6);
-}
-
-void drawGaugeNumber(Arduino_GFX *gfx, uint16_t value,
-                     int16_t centerX, int16_t centerY, uint16_t color) {
-    char text[4];
-    snprintf(text, sizeof(text), "%u", (unsigned)value);
-    const uint8_t count = strlen(text);
-    constexpr int16_t digitAdvance = 11;
-    const int16_t totalWidth = count * digitAdvance - 1;
-    int16_t x = centerX - totalWidth / 2;
-    for (uint8_t i = 0; i < count; ++i, x += digitAdvance) {
-        drawGaugeDigit(gfx, text[i] - '0', x, centerY - 7, color);
-    }
-}
-
-void drawSimCleverLogo(Arduino_GFX *gfx) {
-    const bool dark = darkTheme;
-    const uint16_t navy = gfx->color565(dark ? 185 : 35,
-                                        dark ? 191 : 39,
-                                        dark ? 220 : 66);
-    const uint16_t green = gfx->color565(dark ? 90 : 65,
-                                         dark ? 210 : 145,
-                                         dark ? 110 : 68);
-
-    // Center the 9-character wordmark itself; the former footprint graphic
-    // intentionally does not participate in the visual width anymore.
-    constexpr int16_t logoWidth = 9 * 6 * 2;
-    constexpr int16_t logoX = (SCREEN_W - logoWidth) / 2;
-    gfx->setTextSize(2);
-    gfx->setTextColor(navy);
-    gfx->setCursor(logoX, 142);
-    gfx->print("Sim");
-    gfx->setTextColor(green);
-    gfx->print("Clever");
-}
-
-void flushFullUiFrame() {
-    if (!display || !canvas) return;
-    uint16_t *pixels = canvas->getFramebuffer();
-    constexpr size_t pixelCount = (size_t)SCREEN_W * SCREEN_H;
-
-    // The bulk byte path sends bytes as supplied, whereas Arduino_Canvas stores
-    // native little-endian RGB565. Swap two pixels per iteration. The canvas
-    // is restored from backgroundPixels before the next frame, so a reverse
-    // pass is unnecessary.
-    uint32_t *pairs = reinterpret_cast<uint32_t *>(pixels);
-    constexpr size_t pairCount = pixelCount / 2;
-    for (size_t i = 0; i < pairCount; ++i) {
-        const uint32_t value = pairs[i];
-        pairs[i] = ((value & 0x00FF00FFUL) << 8) |
-                   ((value & 0xFF00FF00UL) >> 8);
-    }
-    if (pixelCount & 1U) {
-        pixels[pixelCount - 1] = __builtin_bswap16(pixels[pixelCount - 1]);
-    }
-
-    // Send the pre-swapped framebuffer directly instead of making the QSPI
-    // driver copy and swap every chunk a second time.
-    display->draw16bitBeRGBBitmap(
-        0, 0, pixels, SCREEN_W, SCREEN_H);
-}
-
-void drawStaticGauge() {
-    const bool dark = darkTheme;
-    const uint16_t outer = canvas->color565(dark ? 0 : 18,
-                                             dark ? 0 : 18,
-                                             dark ? 0 : 18);
-    const uint16_t face = canvas->color565(dark ? 5 : 244,
-                                            dark ? 7 : 240,
-                                            dark ? 9 : 230);
-    const uint16_t ink = canvas->color565(dark ? 225 : 18,
-                                           dark ? 228 : 18,
-                                           dark ? 232 : 18);
-    canvas->fillScreen(outer);
-    // Radius 232 is the largest complete circle that fits around (233, 233)
-    // in the 466x466 framebuffer without clipping its right/bottom pixels.
-    canvas->fillCircle(GAUGE_CX, GAUGE_CY, 232, face);
-    for (int r = 225; r <= 232; ++r) {
-        canvas->drawCircle(GAUGE_CX, GAUGE_CY, r, ink);
-    }
-
-    // Labels return to 0, 20, 40...300. The unlabeled odd tens (10, 30,
-    // 50...) still get long ticks so the 10 mmHg position remains obvious.
-    for (int i = 0; i <= 120; ++i) {
-        const float pressure = i * 2.5f;
-        const bool labeledTwenty = (i % 8) == 0;
-        const bool oddTen = (i % 8) == 4;
-        const bool five = !labeledTwenty && !oddTen && (i % 2) == 0;
-        int16_t xo, yo, xi, yi;
-        pointOnGauge(pressure, 220, xo, yo);
-        pointOnGauge(pressure,
-                     labeledTwenty ? 191 : (oddTen ? 194 : (five ? 202 : 208)),
-                     xi, yi);
-        drawThickLine(canvas, xi, yi, xo, yo, ink,
-                      labeledTwenty ? 4 : (oddTen ? 3 : (five ? 2 : 1)));
-
-        if (labeledTwenty) {
-            int16_t tx, ty;
-            pointOnGauge(pressure, 166, tx, ty);
-            drawGaugeNumber(canvas, (uint16_t)lroundf(pressure), tx, ty, ink);
-        }
-    }
-    drawSimCleverLogo(canvas);
-    drawPulseLed(canvas, false);
-}
-
-bool readTouchPoint(int16_t &x, int16_t &y, bool &pressed) {
-    if (!touchAvailable) return false;
-    Wire.beginTransmission(TOUCH_I2C_ADDRESS);
-    Wire.write((uint8_t)0x02); // number of points, then first point coordinates
-    // Both onboard I2C devices retain their register pointer across STOP.
-    // Avoid the Arduino I2C driver's sporadic repeated-start INVALID_STATE.
-    if (Wire.endTransmission(true) != 0) return false;
-    if (Wire.requestFrom(TOUCH_I2C_ADDRESS, (uint8_t)5) != 5) return false;
-    const uint8_t points = Wire.read() & 0x0f;
-    const uint8_t xh = Wire.read();
-    const uint8_t xl = Wire.read();
-    const uint8_t yh = Wire.read();
-    const uint8_t yl = Wire.read();
-    pressed = points > 0;
-    if (pressed) {
-        const int16_t rawX = ((xh & 0x0f) << 8) | xl;
-        const int16_t rawY = ((yh & 0x0f) << 8) | yl;
-        // Inverse of the software framebuffer rotation: visible left/right
-        // gestures keep matching the rotated UI instead of the raw panel axes.
-        x = SCREEN_H - 1 - rawY;
-        y = rawX;
-    }
-    return true;
-}
-
-bool initializeTouchBus(bool restartBus) {
-    if (restartBus) Wire.end();
-    if (!Wire.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN, 400000)) return false;
-    Wire.setTimeOut(10);
-    Wire.beginTransmission(TOUCH_I2C_ADDRESS);
-    return Wire.endTransmission() == 0;
-}
-
 bool qmi8658ReadRegisterAt(uint8_t address, uint8_t reg, uint8_t &value) {
     Wire.beginTransmission(address);
     Wire.write(reg);
     // QMI8658 retains the register pointer across STOP. Avoiding a repeated
     // start here keeps the shared Arduino I2C peripheral out of the sporadic
-    // INVALID_STATE seen when touch and IMU no-stop reads were interleaved.
+    // INVALID_STATE seen when touch and IMU no-stop reads were interleaved on
+    // the original display board.
     if (Wire.endTransmission(true) != 0) return false;
     if (Wire.requestFrom(address, (uint8_t)1) != 1) return false;
     value = Wire.read();
@@ -967,7 +705,7 @@ bool configureMotionWakeSensor() {
 bool configureMotionTrackingSensor() {
     // Threshold zero exits the one-shot WoM mode and returns INT1 inactive.
     // Normal operation then reads only the low-power accelerometer at 10 Hz;
-    // the gyro, UI task and radio tasks are not touched by this polling path.
+    // the gyro, sensor task and radio tasks are not touched by this polling path.
     return qmi8658WriteRegister(QMI8658_REG_CTRL7, 0x00) &&
            qmi8658WriteRegister(QMI8658_REG_CTRL2,
                                 QMI8658_ACCEL_21HZ_LOW_POWER) &&
@@ -1075,9 +813,6 @@ void updateMotionActivity() {
 void restoreFromStandbyAbort() {
     standbyEntering = false;
     noteMotionActivity();
-    requestedScreenOn = true;
-    screenPowerRevision = screenPowerRevision + 1;
-    if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
 }
 
 void enterMotionStandby() {
@@ -1093,21 +828,15 @@ void enterMotionStandby() {
         return;
     }
 
+    // The sensor task sees this flag and keeps the local pulse LED dark.
     standbyEntering = true;
     fakePulseMode = false;
-    fakePressureOffset = 0.0f;
     standbyRetainedSettings = {
         STANDBY_SETTINGS_MAGIC,
         (uint16_t)fakeBpm,
         (uint16_t)fakeMaxPressureMmHg,
-        (uint16_t)fakeMinPressureMmHg,
-        (uint8_t)(darkTheme ? 1 : 0)
+        (uint16_t)fakeMinPressureMmHg
     };
-
-    // Let the UI task issue the panel sleep command on its own dedicated core.
-    requestedScreenOn = false;
-    screenPowerRevision = screenPowerRevision + 1;
-    if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
 
     // Reject all new triggers and allow the last already-transmitted,
     // future-dated event to finish before the radios and CPUs power down.
@@ -1126,8 +855,7 @@ void enterMotionStandby() {
         return;
     }
 
-    // The panel power transition can couple a one-off transient into the IMU.
-    // Rearm only after the display is off, then wait out the configured eight
+    // Rearm only after the drain window, then wait out the configured eight
     // low-power accelerometer blanking samples before arming ESP deep sleep.
     if (!configureMotionWakeSensor()) {
         Serial.println("[STANDBY] QMI8658 sleep rearm failed");
@@ -1153,108 +881,11 @@ void enterMotionStandby() {
         return;
     }
 
-    Serial.println("[STANDBY] no motion for 5 min; display/radios/triggers off");
+    Serial.println("[STANDBY] no motion for 5 min; radios/triggers off");
     Serial.flush();
     // Deep sleep stops both cores and the Wi-Fi/BLE radio domains. QMI8658
     // remains powered in accelerometer-only WoM mode and raises GPIO8 on motion.
     esp_deep_sleep_start();
-}
-
-void updateTouchGesture() {
-    static bool tracking = false;
-    static bool holdHandled = false;
-    static int16_t startX = 0, startY = 0;
-    static int16_t lastX = 0, lastY = 0;
-    static uint32_t startedMs = 0;
-    static uint32_t lastPollMs = 0;
-    static uint32_t retryAfterMs = 0;
-    static uint8_t consecutiveFailures = 0;
-    const uint32_t nowMs = millis();
-
-    if (!touchAvailable) {
-        if ((int32_t)(nowMs - retryAfterMs) < 0) return;
-        touchAvailable = initializeTouchBus(true);
-        retryAfterMs = nowMs + TOUCH_RETRY_INTERVAL_MS;
-        if (!touchAvailable) return;
-        consecutiveFailures = 0;
-        Serial.println("[TOUCH] I2C recovered");
-    }
-
-    if (nowMs - lastPollMs < TOUCH_POLL_INTERVAL_MS) return;
-    lastPollMs = nowMs;
-
-    int16_t x = 0, y = 0;
-    bool pressed = false;
-    if (!readTouchPoint(x, y, pressed)) {
-        tracking = false;
-        if (++consecutiveFailures >= TOUCH_FAILURE_LIMIT) {
-            consecutiveFailures = 0;
-            touchAvailable = false;
-            retryAfterMs = nowMs + TOUCH_RETRY_INTERVAL_MS;
-            // Keep the shared bus alive for QMI8658. The scheduled recovery
-            // still performs an end/begin pair atomically in initializeTouchBus.
-            Serial.println("[TOUCH] I2C paused after repeated errors");
-        }
-        return;
-    }
-    consecutiveFailures = 0;
-    if (pressed) {
-        noteMotionActivity();
-        if (!tracking) {
-            tracking = true;
-            holdHandled = false;
-            startX = lastX = x;
-            startY = lastY = y;
-            startedMs = nowMs;
-        } else {
-            lastX = x;
-            lastY = y;
-        }
-        if (!holdHandled && nowMs - startedMs >= SCREEN_HOLD_TOGGLE_MS) {
-            holdHandled = true;
-            requestedScreenOn = !requestedScreenOn;
-            screenPowerRevision = screenPowerRevision + 1;
-            if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
-            Serial.printf("[UI] screen=%s\n",
-                          requestedScreenOn ? "on" : "off");
-        }
-        return;
-    }
-    if (!tracking) return;
-    tracking = false;
-    // Do not interpret the release of a completed long press as a swipe.
-    if (holdHandled) return;
-    const int16_t dx = lastX - startX;
-    const int16_t dy = lastY - startY;
-    if (nowMs - startedMs > SWIPE_MAX_DURATION_MS ||
-        abs(dx) < SWIPE_MIN_DISTANCE || abs(dx) <= abs(dy)) return;
-
-    // Light: right-to-left enters dark mode. Dark: left-to-right returns.
-    const bool requestedDark = dx < 0;
-    if (requestedDark == darkTheme) return;
-    darkTheme = requestedDark;
-    themeRevision = themeRevision + 1;
-    if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
-    Serial.printf("[UI] theme=%s\n", requestedDark ? "dark" : "light");
-}
-
-bool beginUi() {
-    bus = new Arduino_ESP32QSPI(LCD_CS, LCD_PCLK, LCD_D0, LCD_D1, LCD_D2, LCD_D3, false);
-    display = new Arduino_CO5300(bus, LCD_RST, DISPLAY_ROTATION,
-                                SCREEN_W, SCREEN_H, 6, 0, 6, 0);
-    if (!display || !display->begin(80000000)) return false;
-    canvas = new Arduino_Canvas(SCREEN_W, SCREEN_H, display,
-                                0, 0, CANVAS_ROTATION);
-    if (!canvas || !canvas->begin(GFX_SKIP_OUTPUT_BEGIN)) return false;
-    const size_t frameBytes = (size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t);
-    backgroundPixels = static_cast<uint16_t *>(
-        heap_caps_malloc(frameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!backgroundPixels) return false;
-
-    drawStaticGauge();
-    memcpy(backgroundPixels, canvas->getFramebuffer(), frameBytes);
-    flushFullUiFrame();
-    return true;
 }
 
 #if 0  // Real cuff-pulse detection removed; synthetic BPM is the only source.
@@ -1379,29 +1010,29 @@ void updatePulseDetector(float pressure, bool saturated, uint32_t nowMs) {
 #endif
 
 void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
-    constexpr uint8_t DISPLAY_PULSE_QUEUE_SIZE = 8;
+    constexpr uint8_t LOCAL_PULSE_QUEUE_SIZE = 8;
     static uint32_t nextBeatMs = 0;
     static uint32_t outOfRangeSinceMs = 0;
     static uint32_t appliedBpmRevision = 0;
-    static int64_t scheduledDisplayUs[DISPLAY_PULSE_QUEUE_SIZE] = {};
-    static uint8_t displayHead = 0;
-    static uint8_t displayCount = 0;
-    static int64_t displayedBeatAtUs = 0;
+    static int64_t scheduledPulseUs[LOCAL_PULSE_QUEUE_SIZE] = {};
+    static uint8_t pulseHead = 0;
+    static uint8_t pulseCount = 0;
+    static int64_t pulseLedUntilUs = 0;
     static bool rangeActive = false;
 
-    const auto clearScheduledDisplay = [&]() {
-        displayHead = 0;
-        displayCount = 0;
-        displayedBeatAtUs = 0;
+    const auto clearScheduledPulses = [&]() {
+        pulseHead = 0;
+        pulseCount = 0;
+        pulseLedUntilUs = 0;
+        setPulseLed(false);
     };
 
     if (otaServiceInProgress() || bleOtaInProgress()) {
         rangeActive = false;
         nextBeatMs = 0;
         outOfRangeSinceMs = 0;
-        clearScheduledDisplay();
+        clearScheduledPulses();
         fakePulseMode = false;
-        fakePressureOffset = 0.0f;
         return;
     }
 
@@ -1410,8 +1041,7 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
         nextBeatMs = 0;
         outOfRangeSinceMs = 0;
         rangeActive = false;
-        clearScheduledDisplay();
-        fakePressureOffset = 0.0f;
+        clearScheduledPulses();
     }
 
     // Synthetic BPM exists only strictly between the BLE diastolic and
@@ -1421,7 +1051,6 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
         realPressure < (float)fakeMaxPressureMmHg;
     if (!rangeActive) {
         if (!rawPressureInRange) {
-            fakePressureOffset = 0.0f;
             fakePulseMode = false;
             return;
         }
@@ -1434,31 +1063,22 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
     } else {
         if (outOfRangeSinceMs == 0) outOfRangeSinceMs = nowMs;
         if (nowMs - outOfRangeSinceMs >= FAKE_RANGE_EXIT_DEBOUNCE_MS) {
-            const bool exitedAboveUpper =
-                realPressure > (float)fakeMaxPressureMmHg || saturated;
+            // Clearing also cancels LED events queued for the old valid range.
             rangeActive = false;
             outOfRangeSinceMs = 0;
             nextBeatMs = 0;
-            clearScheduledDisplay();
-            fakePressureOffset = 0.0f;
+            clearScheduledPulses();
             fakePulseMode = false;
-            if (exitedAboveUpper) {
-                // Cancel a UI event already queued for the old valid range.
-                fakeUiCancelRevision = fakeUiCancelRevision + 1;
-            }
             return;
         }
     }
 
-    // Keep the 300 ms debounce only for the beat timeline. Ripple and UI LED
-    // visibility follow the strict pressure bounds immediately, so a pulse
-    // cannot remain visible at/below DIA or above SYS while the cadence state
-    // waits to see whether this was merely boundary noise.
+    // Keep the 300 ms debounce only for the beat timeline. The local LED
+    // follows the strict pressure bounds immediately, so a pulse cannot remain
+    // visible at/below DIA or above SYS while the cadence state waits to see
+    // whether this was merely boundary noise.
     fakePulseMode = rawPressureInRange;
-    if (!rawPressureInRange) {
-        displayedBeatAtUs = 0;
-        fakePressureOffset = 0.0f;
-    }
+    if (!rawPressureInRange) pulseLedUntilUs = 0;
 
     const uint16_t bpm = constrain((uint16_t)fakeBpm,
                                    (uint16_t)30, (uint16_t)240);
@@ -1471,61 +1091,42 @@ void updateFakePulse(float realPressure, bool saturated, uint32_t nowMs) {
         int64_t executeAtUs = 0;
         uint32_t eventId = 0;
         if (rawPressureInRange &&
-            displayCount < DISPLAY_PULSE_QUEUE_SIZE &&
+            pulseCount < LOCAL_PULSE_QUEUE_SIZE &&
             sendPulseTrigger(PULSE_LARGE, 0, &executeAtUs, &eventId)) {
-            const uint8_t tail = (displayHead + displayCount) %
-                                 DISPLAY_PULSE_QUEUE_SIZE;
-            scheduledDisplayUs[tail] = executeAtUs;
-            ++displayCount;
+            const uint8_t tail = (pulseHead + pulseCount) %
+                                 LOCAL_PULSE_QUEUE_SIZE;
+            scheduledPulseUs[tail] = executeAtUs;
+            ++pulseCount;
         }
     }
 
-    // Drain acknowledgements; all outputs and the monitor still start from
+    // Drain acknowledgements; all outputs and the local LED still start from
     // the same master executeAt timestamp. Waiting for the first ACK here
-    // would make the display follow one transport and de-sync from the other.
+    // would make the LED follow one transport and de-sync from the other.
     WifiLedAck wifiAck{};
     while (wifiTakeLedAck(wifiAck)) {}
     BleLedAck bleAck{};
     while (bleTakeLedAck(bleAck)) {}
 
-    while (displayCount > 0 &&
-           nowUs >= scheduledDisplayUs[displayHead]) {
-        const int64_t dueDisplayUs = scheduledDisplayUs[displayHead];
-        displayHead = (displayHead + 1) % DISPLAY_PULSE_QUEUE_SIZE;
-        --displayCount;
+    while (pulseCount > 0 && nowUs >= scheduledPulseUs[pulseHead]) {
+        const int64_t duePulseUs = scheduledPulseUs[pulseHead];
+        pulseHead = (pulseHead + 1) % LOCAL_PULSE_QUEUE_SIZE;
+        --pulseCount;
+        // An event that falls due while out of range is consumed, so it
+        // cannot flash late when pressure re-enters the range.
         if (rawPressureInRange) {
-            displayedBeatAtUs = dueDisplayUs;
-            visiblePulseCount = visiblePulseCount + 1;
-            if (uiTaskHandle) xTaskNotifyGive(uiTaskHandle);
-        } else {
-            // Consume an already scheduled visual event while hidden. It must
-            // not reappear as a partial ripple when pressure re-enters range.
-            displayedBeatAtUs = 0;
+            pulseLedUntilUs = duePulseUs + (int64_t)PULSE_LED_ON_MS * 1000;
         }
     }
 
-    // Every beat uses the same fixed 1.5 mmHg peak. Duration scales with the
-    // configured BPM so high rates cannot overlap into a continuous wobble.
-    const uint32_t pulseDurationMs = min<uint32_t>(520, periodMs * 65 / 100);
-    const int64_t ageUs = nowUs - displayedBeatAtUs;
-    if (rawPressureInRange && displayedBeatAtUs != 0 && ageUs >= 0 &&
-        ageUs < (int64_t)pulseDurationMs * 1000) {
-        const float phase = (float)ageUs /
-                            ((float)pulseDurationMs * 1000.0f);
-        // The physical LEDs turn on at displayedBeatAtUs. Put the dial peak at
-        // that exact timestamp as well, then return smoothly to baseline.
-        // The previous full raised cosine peaked halfway through the pulse,
-        // making the dial appear roughly 260 ms late.
-        fakePressureOffset = FAKE_PULSE_AMPLITUDE_MMHG *
-                             0.5f * (1.0f + cosf(PI * phase));
-    } else {
-        fakePressureOffset = 0.0f;
-    }
+    // The 500 Hz sensor task gives the LED 2 ms timing resolution.
+    setPulseLed(!standbyEntering && rawPressureInRange &&
+                nowUs < pulseLedUntilUs);
 }
 
 float medianPressureSample(float sample) {
     // Fixed-size stack/ring buffers only: at 500 Hz this is at most ten tiny
-    // comparisons per sample and never allocates or touches the UI core.
+    // comparisons per sample and never allocates.
     static float samples[PRESSURE_MEDIAN_WINDOW] = {};
     static uint8_t nextSample = 0;
     static bool initialized = false;
@@ -1582,7 +1183,8 @@ float rejectTransientPressureSpike(float sample) {
     const float distanceFromAccepted = sample - acceptedPressure;
     if (fabsf(distanceFromAccepted) <= PRESSURE_SPIKE_RETURN_MMHG) {
         // It returned to the old signal before confirmation: discard the
-        // complete excursion instead of letting even one UI frame see it.
+        // complete excursion instead of letting even one trigger decision
+        // see it.
         candidateActive = false;
         candidateSamples = 0;
         acceptedPressure = sample;
@@ -1612,8 +1214,7 @@ float rejectTransientPressureSpike(float sample) {
 
     if (++candidateSamples >= PRESSURE_SPIKE_CONFIRM_SAMPLES) {
         // A persistent transition is real inflation/deflation. Together with
-        // the median window its added latency is about 20 ms, below one 30 Hz
-        // UI frame.
+        // the median window its added latency is about 20 ms.
         candidateActive = false;
         candidateSamples = 0;
         acceptedPressure = sample;
@@ -1658,185 +1259,18 @@ void processSample(int32_t raw, uint32_t milliVolts) {
     float p = ((float)milliVolts - (float)zeroMilliVolts) *
               SENSOR_FULL_SCALE_MMHG / usableSpanMv;
     p *= PRESSURE_GAIN_CORRECTION;
-    p = constrain(p, -20.0f, GAUGE_MAX_MMHG);
+    p = constrain(p, -20.0f, PRESSURE_MAX_MMHG);
     const float cleanPressure = rejectTransientPressureSpike(
         medianPressureSample(p));
     latestRaw = raw;
     latestMilliVolts = milliVolts;
     adcSaturated = raw >= ADC_RESOLUTION_MAX - 3 || milliVolts >= 3050;
-    // UI and synthetic range decisions share the cleaned physical pressure.
-    // The fixed synthetic ripple is still added afterwards in updateUi().
+    // Trigger-state and synthetic range decisions share the cleaned physical
+    // pressure.
     targetPressure = max(0.0f, cleanPressure);
     const uint32_t nowMs = millis();
     updateTriggerState(targetPressure, adcSaturated);
     updateFakePulse(targetPressure, adcSaturated, nowMs);
-}
-
-void updateUi() {
-    static uint32_t displayedPulseCount = 0;
-    static uint32_t pulseLedUntilMs = 0;
-    static uint32_t appliedCancelRevision = 0;
-    static float filteredUiBasePressure = -1.0f;
-    static uint32_t appliedScreenPowerRevision = 0;
-    static bool screenOn = true;
-    const uint32_t requestedPowerRevision = screenPowerRevision;
-    if (requestedPowerRevision != appliedScreenPowerRevision) {
-        appliedScreenPowerRevision = requestedPowerRevision;
-        screenOn = requestedScreenOn;
-        if (screenOn) {
-            display->displayOn();
-        } else {
-            display->displayOff();
-        }
-    }
-    if (!screenOn) return;
-
-    static uint32_t appliedThemeRevision = 0;
-    const uint32_t requestedThemeRevision = themeRevision;
-    const bool themeChanged = requestedThemeRevision != appliedThemeRevision;
-    if (themeChanged) {
-        appliedThemeRevision = requestedThemeRevision;
-        drawStaticGauge();
-        const size_t frameBytes =
-            (size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t);
-        memcpy(backgroundPixels, canvas->getFramebuffer(), frameBytes);
-    }
-
-    // Re-check the pressure at draw time. This prevents a previously queued
-    // display beat from appearing after the cuff has fallen out of range,
-    // even if the sensor task and UI task cross between two frames.
-    const float basePressure = (float)targetPressure;
-    if (filteredUiBasePressure < 0.0f) {
-        filteredUiBasePressure = basePressure;
-    } else {
-        const float difference = basePressure - filteredUiBasePressure;
-        // Strong filtering for ADC jitter, faster tracking while the cuff is
-        // actively inflated/deflated. The synthetic pulse is added afterwards
-        // so its timestamp and fixed 1.5 mmHg amplitude are not attenuated.
-        // These faster coefficients remove the former "low FPS" feeling while
-        // retaining enough filtering to stop single-sample needle chatter.
-        const float alpha = fabsf(difference) > 3.0f ? 0.65f : 0.20f;
-        filteredUiBasePressure += difference * alpha;
-        if (fabsf(basePressure - filteredUiBasePressure) < 0.04f) {
-            filteredUiBasePressure = basePressure;
-        }
-    }
-    displayedGaugeBasePressure = filteredUiBasePressure;
-    // Final UI gate uses exactly the current measured value requested by the
-    // BLE contract: DIA < measured mmHg < SYS. Otherwise the added fake offset
-    // and its UI LED are both zero/hidden immediately.
-    const float measuredPressure = (float)targetPressure;
-    const bool fakeVisible = fakePulseMode &&
-        (float)fakeMinPressureMmHg < measuredPressure &&
-        measuredPressure < (float)fakeMaxPressureMmHg;
-    const float pressure = constrain(filteredUiBasePressure +
-                                     (fakeVisible
-                                          ? constrain((float)fakePressureOffset, 0.0f,
-                                                      FAKE_PULSE_AMPLITUDE_MMHG)
-                                          : 0.0f),
-                                     0.0f, GAUGE_MAX_MMHG);
-
-    // Full-frame composition: discard every previous dynamic pixel before
-    // drawing this frame. No dirty rectangles or overlap repair are needed.
-    const size_t frameBytes =
-        (size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t);
-    memcpy(canvas->getFramebuffer(), backgroundPixels, frameBytes);
-
-    int16_t newX, newY;
-    pointOnGauge(pressure, NEEDLE_RADIUS, newX, newY);
-
-    const uint32_t nowMs = millis();
-    const uint32_t pulseCount = visiblePulseCount;
-    const uint32_t cancelRevision = fakeUiCancelRevision;
-    if (cancelRevision != appliedCancelRevision) {
-        appliedCancelRevision = cancelRevision;
-        displayedPulseCount = pulseCount;
-        pulseLedUntilMs = 0;
-    } else if (!fakeVisible) {
-        // Consume any already-counted UI event while hidden so it cannot flash
-        // late when pressure rises above 30 mmHg again.
-        displayedPulseCount = pulseCount;
-        pulseLedUntilMs = 0;
-    } else if (pulseCount != displayedPulseCount) {
-        displayedPulseCount = pulseCount;
-        pulseLedUntilMs = nowMs + PULSE_LED_ON_MS;
-    }
-
-    const bool shouldLightLed = fakeVisible && displayedPulseCount != 0 &&
-                                (int32_t)(pulseLedUntilMs - nowMs) > 0;
-    drawPulseLed(canvas, shouldLightLed);
-
-    // Larger battery indicator remains centered against the lower edge and is
-    // rebuilt on every full frame from the latest sampled value.
-    const uint8_t shownBatteryPercent = batteryPercent;
-    const bool shownBatteryValid = batteryReadingValid;
-    const bool shownBatteryCharging = batteryChargingEstimated;
-    constexpr int16_t batX = BATTERY_X, batY = BATTERY_Y;
-    constexpr int16_t batW = BATTERY_W, batH = BATTERY_H;
-    const bool dark = darkTheme;
-    const uint16_t face = canvas->color565(dark ? 5 : 244,
-                                            dark ? 7 : 240,
-                                            dark ? 9 : 230);
-    const uint16_t ink = canvas->color565(dark ? 225 : 40,
-                                           dark ? 228 : 45,
-                                           dark ? 232 : 48);
-    const uint16_t level = shownBatteryPercent > 20
-                               ? canvas->color565(25, 145, 65)
-                               : canvas->color565(190, 35, 30);
-    char batteryText[12];
-    if (shownBatteryValid) {
-        snprintf(batteryText, sizeof(batteryText),
-                 shownBatteryCharging ? "%u%% CHG" : "%u%%",
-                 (unsigned)shownBatteryPercent);
-    } else {
-        snprintf(batteryText, sizeof(batteryText), "BAT --");
-    }
-    constexpr int16_t iconWidth = 38;
-    constexpr int16_t contentGap = 9;
-    const int16_t textWidth = strlen(batteryText) * 12;
-    const int16_t contentWidth = iconWidth + contentGap + textWidth;
-    const int16_t contentX = batX + (batW - contentWidth) / 2;
-
-    canvas->fillRect(batX, batY, batW, batH, face);
-    canvas->drawRect(contentX, batY + 5, 34, 17, ink);
-    canvas->fillRect(contentX + 34, batY + 10, 4, 7, ink);
-    if (shownBatteryValid) {
-        const int16_t fillW = (int16_t)shownBatteryPercent * 28 / 100;
-        if (fillW > 0) {
-            canvas->fillRect(contentX + 3, batY + 8, fillW, 11, level);
-        }
-    }
-    canvas->setTextSize(2);
-    canvas->setTextColor(ink);
-    canvas->setCursor(contentX + iconWidth + contentGap, batY + 7);
-    canvas->print(batteryText);
-
-    // Connection strip is also rebuilt into the same framebuffer.
-    const WifiNodeStatus wifi = wifiNodeStatus(WIFI_NODE_ID);
-    const BleNodeStatus ble = bleNodeStatus();
-    constexpr int16_t statusX = STATUS_X, statusY = STATUS_Y;
-    constexpr int16_t statusW = STATUS_W, statusH = STATUS_H;
-    const uint16_t ok = canvas->color565(dark ? 65 : 0,
-                                          dark ? 220 : 120,
-                                          dark ? 105 : 45);
-    const uint16_t bad = canvas->color565(dark ? 255 : 170,
-                                           dark ? 80 : 25,
-                                           dark ? 75 : 25);
-    canvas->fillRect(statusX, statusY, statusW, statusH, face);
-    canvas->setTextSize(2);
-    canvas->setTextColor(wifi.synced ? ok : bad);
-    canvas->setCursor(statusX + 5, statusY + 5);
-    canvas->print("W:");
-    canvas->print(wifi.synced ? "OK" : (wifi.connected ? "SYNC" : "OFF"));
-    canvas->setTextColor(ble.synced ? ok : bad);
-    canvas->setCursor(statusX + 101, statusY + 5);
-    canvas->print("B:");
-    canvas->print(ble.synced ? "OK" : (ble.connected ? "SYNC" : "OFF"));
-
-    // Needle is always the final layer, then the entire frame is transferred
-    // in one operation. This intentionally favors correctness over bandwidth.
-    drawNeedleLayer(canvas, newX, newY);
-    flushFullUiFrame();
 }
 
 void sensorTask(void *) {
@@ -1854,7 +1288,7 @@ void sensorTask(void *) {
             lastWakeTick = sensorNowTick;
         }
         // Block instead of busy-spinning between 500 Hz samples. This leaves
-        // CPU time for the display and, most importantly, the radio stacks.
+        // CPU time for the radio stacks.
         vTaskDelayUntil(&lastWakeTick, samplePeriodTicks);
 
         // Two adjacent conversions expose both native 12-bit data and the
@@ -1873,63 +1307,6 @@ void sensorTask(void *) {
                           (now - rateWindowStarted);
             sampleCount = 0;
             rateWindowStarted = now;
-        }
-    }
-}
-
-void uiTask(void *) {
-    const TickType_t framePeriodTicks = pdMS_TO_TICKS(1000 / UI_REFRESH_HZ);
-    TickType_t lastPeriodicFrame = xTaskGetTickCount();
-    uint32_t rateWindowStarted = millis();
-    uint16_t frameCount = 0;
-
-    for (;;) {
-        // Keep an absolute 30 Hz timeline: drawing time is part of the 33 ms
-        // frame budget instead of being added before every wait. A trigger can
-        // wake us early without shifting subsequent periodic frames.
-        TickType_t nowTick = xTaskGetTickCount();
-        TickType_t deadline = lastPeriodicFrame + framePeriodTicks;
-        TickType_t waitTicks = (int32_t)(deadline - nowTick) > 0
-                                   ? deadline - nowTick
-                                   : 0;
-        const bool triggerWake =
-            ulTaskNotifyTake(pdTRUE, waitTicks) > 0;
-        nowTick = xTaskGetTickCount();
-        if (!triggerWake || (int32_t)(nowTick - deadline) >= 0) {
-            // Advance by one fixed period. If unexpectedly very late, discard
-            // missed frames rather than burst-rendering them.
-            lastPeriodicFrame = deadline;
-            if ((int32_t)(nowTick - lastPeriodicFrame) >
-                (int32_t)(framePeriodTicks * 2)) {
-                lastPeriodicFrame = nowTick;
-            }
-        }
-
-        const uint32_t drawStartedMs = millis();
-        updateUi();
-        const uint32_t drawMs = millis() - drawStartedMs;
-        lastUiFrameMs = millis();
-        if (drawMs > maxUiDrawMs) {
-            maxUiDrawMs = (uint16_t)min<uint32_t>(drawMs, UINT16_MAX);
-        }
-        ++frameCount;
-
-        const uint32_t now = millis();
-        if (now - rateWindowStarted >= 1000) {
-            measuredUiFps = (uint32_t)frameCount * 1000 /
-                            (now - rateWindowStarted);
-            frameCount = 0;
-            rateWindowStarted = now;
-        }
-
-        // An early trigger frame may itself cross the pending periodic
-        // deadline. Count it as that frame so we never draw twice back-to-back.
-        if (triggerWake) {
-            nowTick = xTaskGetTickCount();
-            deadline = lastPeriodicFrame + framePeriodTicks;
-            if ((int32_t)(nowTick - deadline) >= 0) {
-                lastPeriodicFrame = deadline;
-            }
         }
     }
 }
@@ -1958,7 +1335,6 @@ void setup() {
         fakeMinPressureMmHg = constrain(
             standbyRetainedSettings.diastolicMmHg,
             (uint16_t)1, (uint16_t)(fakeMaxPressureMmHg - 1));
-        darkTheme = standbyRetainedSettings.darkTheme != 0;
         Serial.println("[STANDBY] motion wake; restoring normal operation");
     }
     Serial.printf("[FAKE PULSE] current BPM=%u range=%u-%u mmHg\n",
@@ -1969,12 +1345,20 @@ void setup() {
     analogReadResolution(12);
     analogSetPinAttenuation(PRESSURE_ADC_PIN, ADC_11db);
     analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db);
-    if (!beginUi()) Serial.println("[UI] display initialization failed");
-    touchAvailable = initializeTouchBus(false);
-    Serial.printf("[TOUCH] I2C 0x%02X on GPIO%u/%u: %s\n",
-                  TOUCH_I2C_ADDRESS, TOUCH_SDA_PIN, TOUCH_SCL_PIN,
-                  touchAvailable ? "ready" : "not found");
-    imuMotionWakeAvailable = initializeMotionWake();
+    if (PULSE_LED_PIN >= 0) {
+        pinMode(PULSE_LED_PIN, OUTPUT);
+        setPulseLed(false);
+        Serial.printf("[PULSE LED] GPIO%d active-%s\n", PULSE_LED_PIN,
+                      PULSE_LED_ACTIVE_LEVEL == HIGH ? "high" : "low");
+    }
+    const bool imuBusReady = Wire.begin(IMU_SDA_PIN, IMU_SCL_PIN, 400000);
+    if (imuBusReady) {
+        Wire.setTimeOut(10);
+    } else {
+        Serial.printf("[STANDBY] I2C GPIO%u/%u init failed; auto-standby disabled\n",
+                      IMU_SDA_PIN, IMU_SCL_PIN);
+    }
+    imuMotionWakeAvailable = imuBusReady && initializeMotionWake();
     wifiMasterBegin();
     otaServiceBegin();
     bleMasterBegin();
@@ -1983,33 +1367,29 @@ void setup() {
                   PRESSURE_ADC_PIN, SENSOR_FULL_SCALE_MV / 1000.0f,
                   SENSOR_FULL_SCALE_MMHG);
     Serial.println("[SENSOR] Keep cuff empty during startup auto-zero");
-    // UI responsiveness is the primary requirement: Core 1 is dedicated to
-    // the display task at high priority. The sensor blocks between samples,
-    // so its short ADC work can safely share Core 0 with the radio stacks.
+    // The sensor blocks between samples, so its short ADC work can safely
+    // share Core 0 with the radio stacks.
     xTaskCreatePinnedToCore(sensorTask, "pressure_adc", 4096, nullptr, 3,
                             nullptr, 0);
-    xTaskCreatePinnedToCore(uiTask, "dial_30hz", 4096, nullptr, 4,
-                            &uiTaskHandle, 1);
+}
+
+const char *linkStateLabel(bool connected, bool synced) {
+    return synced ? "OK" : (connected ? "SYNC" : "OFF");
 }
 
 void loop() {
     if (!bleOtaInProgress()) otaServiceHandle();
     updateMotionActivity();
-    updateTouchGesture();
     BlePhoneCommand phoneCommand{};
     while (bleTakePhoneCommand(phoneCommand)) {
         if (phoneCommand.type == BLE_PHONE_SET_BPM) {
-            // Cancel the old range's synthetic display state before publishing
-            // new BLE limits. This prevents even one stale 30 Hz UI frame.
-            fakePulseMode = false;
-            fakePressureOffset = 0.0f;
-            fakeUiCancelRevision = fakeUiCancelRevision + 1;
             if (phoneCommand.hasPressureRange) {
                 fakeMaxPressureMmHg = phoneCommand.systolicMmHg;
                 fakeMinPressureMmHg = phoneCommand.diastolicMmHg;
             }
             // Runtime BLE changes are deliberately RAM-only. NVS/flash writes
-            // can suspend instruction-cache access and visibly freeze the UI.
+            // can suspend instruction-cache access and stall 500 Hz sampling.
+            // The revision bump also cancels LED events of the old range.
             fakeBpm = phoneCommand.bpm;
             fakeBpmRevision = fakeBpmRevision + 1;
             blePublishBpm(phoneCommand.bpm, fakeMaxPressureMmHg,
@@ -2035,19 +1415,21 @@ void loop() {
         const int32_t raw = latestRaw;
         const uint32_t milliVolts = latestMilliVolts;
         const float pressure = targetPressure;
-        const uint32_t uiAgeMs = now - lastUiFrameMs;
-        const uint16_t uiMaxMs = maxUiDrawMs;
-        maxUiDrawMs = 0;
-        Serial.printf("[SENSOR] adc=%ld delta=%ld mV=%lu zero_mV=%lu mmHg=%.2f sat=%u sps=%u ui_fps=%u ui_age=%lu ui_max=%u bpm=%u range=%u-%u fake=%.2f bat=%umV/%u%% charge_est=%u\n",
+        // Without a display, this line also carries the former on-screen
+        // W:/B: connection strip.
+        const WifiNodeStatus wifi = wifiNodeStatus(WIFI_NODE_ID);
+        const BleNodeStatus ble = bleNodeStatus();
+        Serial.printf("[SENSOR] adc=%ld delta=%ld mV=%lu zero_mV=%lu mmHg=%.2f sat=%u sps=%u bpm=%u range=%u-%u pulse=%u wifi=%s ble=%s bat=%umV/%u%% charge_est=%u\n",
                       (long)raw, (long)(raw - zeroRaw),
                       (unsigned long)milliVolts,
                       (unsigned long)zeroMilliVolts, pressure,
-                      adcSaturated ? 1U : 0U, measuredSps, measuredUiFps,
-                      (unsigned long)uiAgeMs, (unsigned)uiMaxMs,
+                      adcSaturated ? 1U : 0U, measuredSps,
                       (unsigned)fakeBpm,
                       (unsigned)fakeMinPressureMmHg,
                       (unsigned)fakeMaxPressureMmHg,
-                      (double)fakePressureOffset,
+                      fakePulseMode ? 1U : 0U,
+                      linkStateLabel(wifi.connected, wifi.synced),
+                      linkStateLabel(ble.connected, ble.synced),
                       (unsigned)batteryVoltageMv,
                       (unsigned)batteryPercent,
                       batteryChargingEstimated ? 1U : 0U);
