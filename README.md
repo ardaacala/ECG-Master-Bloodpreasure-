@@ -1,4 +1,6 @@
-# State based Trigger BLE Master Software — Version 4.1.0
+# ESP32-S3 Tansiyon Simülatörü ve Kablosuz Senkronizasyon
+
+**Sürüm: 4.1.0 · PlatformIO / Arduino · Wi-Fi / BLE**
 
 Waveshare ESP32-S3 Touch AMOLED 1.43 (466×466) için PlatformIO tabanlı tansiyon
 simülatörü/master firmware'i. Ekrandaki kadran, sentetik nabız salınımı, Wi-Fi
@@ -7,6 +9,75 @@ slave ve BLE slave aynı planlanmış tetikleme zamanını kullanır.
 > Bu depo `v4.0.0` ile aynı donanım düzenini hedefler; `v4.1.0` donanımda
 > değişiklik getirmez. 1.91 inç veya farklı pin dizilimli kartlara doğrudan
 > yüklenmemelidir.
+
+## Projenin amacı ve kapsamı
+
+Rise Teknoloji staj çalışmaları kapsamında geliştirilen bu proje, tıbbi simülasyon
+eğitiminde kullanılmak üzere manşet basıncını görüntüleyen ve ayarlanabilir bir
+nabız ritmini kablosuz alıcılarla ortak zaman referansında çalıştıran bir master
+sistemidir. Basınç sensöründen alınan değer gerçektir; ekrandaki nabız salınımı
+yazılımla üretilir. Sistem gerçek hastadan nabız veya sistolik/diyastolik değer
+tespit etmek yerine, eğitim senaryosunda ayarlanan BPM ve basınç sınırlarını kullanır.
+
+Uygulama hedefi, tansiyon cihazındaki görsel nabız ile mevcut SimClever akıllı
+steteskopundaki sesin eş zamanlı çalışmasıdır. Steteskobun RFID etiketleriyle
+bölge tanıma ve uygun organ sesini seçme işlevleri mevcut ürün altyapısına aittir.
+Bu depo master firmware'ini, haberleşme protokolünü ve LED çıkışı üzerinden
+tetikleme davranışını gösteren Wi-Fi/BLE slave örneklerini içerir. Mevcut
+steteskobun tam RFID ve ses oynatma yazılımı bu deponun kapsamına dahil değildir.
+
+## Sistem mimarisi ve zamanlama
+
+```mermaid
+flowchart TD
+    P["Manşet basınç sensörü"] --> M["ESP32-S3 master"]
+    C["Telefon: BPM ve basınç sınırları"] -->|"BLE"| M
+    M --> U["Dairesel ekran ve simüle nabız"]
+    M <-->|"Wi-Fi: saat senkronizasyonu ve durum"| W["Wi-Fi slave: yerel ritim ve çıkış"]
+    M <-->|"BLE: saat senkronizasyonu ve durum"| B["BLE slave: yerel ritim ve çıkış"]
+```
+
+1. Master ve slave saatleri arasındaki fark zaman damgalı mesajlarla belirlenir.
+2. Master, gelecekteki ortak başlangıç zamanını kendi saatine göre planlar.
+3. Slave, bu zamanı hesaplanan offset ile kendi yerel saatine dönüştürür.
+4. Master arayüzü ve slave çıkışları aynı zaman referansından hareket eder.
+
+```text
+clockOffsetUs = slaveClock - masterClock
+localTargetUs = executeAtMasterUs + clockOffsetUs
+```
+
+İlk yaklaşımda her nabız için ayrı tetik paketi gönderilirken V3'te BPM, basınç
+bölgesi ve ortak başlangıç zamanı içeren durum paketine geçilmiştir. Slave,
+ritmi yerel olarak üretir; periyodik saat senkronizasyonu ayrıca sürdürülür.
+Bu yaklaşım her nabızda paket gönderme gereksinimini kaldırır. Uçtan uca ses ve
+görüntü uyumunun değerlendirilmesinde ekran aktarımı ve alıcıdaki ses başlatma
+gecikmeleri de dikkate alınmalıdır.
+
+## Geliştirme adımları
+
+Aşağıdaki tablo branch ve sürüm kayıtlarının teknik özetidir; stajın haftalık
+takvimini veya her özelliğin donanım üzerinde doğrulandığını tek başına göstermez.
+
+| Aşama / branch | Ele alınan konu |
+|---|---|
+| İlk sürümler ve V2 | Basınç gösterimi, sentetik nabız, ortak zamanlı Wi-Fi/BLE tetikleme ve çekirdekler arasında görev dağılımı |
+| `hotfix/pressure-spike-filter` | Kısa süreli ADC sıçramalarının median filtre ve süreklilik kontrolüyle bastırılması |
+| `feature/state-based-trigger-v3` | Her nabızda mesaj yerine durum aktarımı, yerel ritim üretimi, ACK ve yeniden bağlantı davranışı |
+| `feature/full-screen-ui-refresh` | İbre ve göstergelerin bıraktığı görüntü izlerinin tam ekran framebuffer aktarımıyla giderilmesi |
+| `feature/battery-level-while-charging-fix` | Şarj sırasında yükselen gerilimin batarya yüzdesini olduğundan yüksek göstermesine yönelik düzeltmeler |
+| `feature/wake-on-motion` | Hareketsizlikte bekleme ve hareket algılandığında uyanma |
+| `feature/wifi-ota` / `feature/ble-ota-pc` | Wi-Fi ve PC üzerinden BLE ile kablosuz firmware güncelleme |
+
+Ayrıntılı sürüm geçmişi: [CHANGELOG.md](CHANGELOG.md). Paket yapıları ve saat
+sözleşmesi: [PROTOCOL.md](PROTOCOL.md) ve
+[V3 entegrasyon belgesi](docs/STATE_TRIGGER_PROTOCOL_V3.md).
+
+## Kaynak kod bağlantısı
+
+Staj raporunda kaynak kod ve geliştirme geçmişi için kullanılabilecek depo adresi:
+
+https://github.com/ardaacala/ECG-Master-Bloodpreasure-
 
 ## Version 4.1.0 şarj farkındalıklı batarya göstergesi
 
@@ -61,7 +132,8 @@ Paket yerlesimi, tekrar/ACK kurallari ve slave gelistirme notlari
 
 ## Temel özellikler
 
-- 30 Hz AMOLED arayüzü; UI görevi Core 1'de, radyo ve ADC işleri Core 0'da.
+- UI görevi Core 1'de 30 Hz hedef periyotla zamanlanır; radyo ve ADC işleri Core 0'dadır.
+  Tam ekran aktarımında belgelenen gerçekleşen hız yaklaşık 14–15 FPS'dir.
 - UI her karede tek bir tamamlanmış 466x466 framebuffer aktarır; ibre, LED,
   bağlantı ve batarya katmanları arasında kirli-dikdörtgen çakışması oluşmaz.
 - Tam-kare QSPI aktarımı 8192 piksellik bloklarla yapılır. Framebuffer RGB565
@@ -402,7 +474,6 @@ bir cevap ancak ayrı bir VBUS/STAT bağlantısıyla mümkündür.
 - `tools/ble_ota_upload.py`: Windows/macOS/Linux için Bleak tabanlı PC yükleyici.
 - `include/config.h`: ağ, cihaz kimliği, pin ve zamanlama sabitleri.
 - `include/protocol.h`: Wi-Fi/BLE paketleri ve UUID'ler.
-- `AGENTS.md` / `CLAUDE.md`: Codex ve Claude için güvenli çalışma kuralları.
 - `slave1_wifi`: Wi-Fi slave firmware'i.
 - `slave2_ble`: GPIO4 active-low BLE slave firmware'i.
 
