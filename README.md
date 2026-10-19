@@ -26,6 +26,19 @@ Bu depo master firmware'ini, haberleşme protokolünü ve LED çıkışı üzeri
 tetikleme davranışını gösteren Wi-Fi/BLE slave örneklerini içerir. Mevcut
 steteskobun tam RFID ve ses oynatma yazılımı bu deponun kapsamına dahil değildir.
 
+## İlk prototip: üç ESP32 ile LED senkronizasyonu
+
+Haberleşme ve zamanlama altyapısı, tansiyon cihazı–steteskop entegrasyonundan
+önce üç ESP32 içeren bir test düzeneğinde geliştirildi. Bir master ve iki slave
+üzerinden Wi-Fi/BLE haberleşmesi kurularak LED çıkışlarının aynı anda
+tetiklenmesi hedeflendi. Saat farkı (offset) hesabı ve ileri zaman damgalı
+tetikleme bu düzenek üzerinde denenerek sistem geliştirildi.
+
+Bu aşama, kablosuz tetiklemenin davranışını görsel olarak izlemeyi sağladı ve
+sonraki görüntü–ses senkronizasyonu çalışmalarına temel oluşturdu. LED'lerin
+birlikte yanmasının gözlenmesi, tek başına ölçülmüş bir mikro/milisaniye
+hata sınırı veya tamamlanmış ses entegrasyonu sonucu olarak yorumlanmamalıdır.
+
 ## Sistem mimarisi ve zamanlama
 
 ```mermaid
