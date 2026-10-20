@@ -21,15 +21,25 @@ explicitly requests a hardware migration.
   display/touch code or the GFX/LVGL libraries.
 - Pressure ADC is GPIO2. Battery ADC is GPIO4 with divider ratio 3.0. Both must
   stay on ADC1 because ADC2 is unavailable while Wi-Fi runs.
-- QMI8658 I2C is SDA47/SCL48 and its INT1 wake line is GPIO8 (an RTC GPIO, used
-  for ext0 deep-sleep wake). Do not reassign or initialize the IMU as part of
-  unrelated changes. A missing IMU must only disable auto-standby.
+- There is no IMU or I2C bus; GPIO8/47/48 are unused. Auto-standby is driven by
+  cuff pressure: 30 min at or below 5 mmHg deep-sleeps the board, the timer
+  wake waits in light sleep with the radios off, and > 5 mmHg resumes normal
+  startup. The wait runs in `setup()` before Wi-Fi, BLE, OTA and the sensor
+  task exist. The empty-cuff zero is kept in RTC memory; never re-run the
+  startup auto-zero on a standby wake.
 - The optional local pulse LED is `PULSE_LED_PIN` in `include/config.h`
   (`-1` = disabled). Never place it on strapping pins 0, 3, 45 or 46.
+- The BLE status LED is `BLE_STATUS_LED_PIN` (default GPIO6). It blinks fast
+  while BLE runs without a synced slave, slowly when the BLE slave is synced,
+  and stays dark while BLE is off (before startup and in standby). It is driven
+  from the Arduino loop, never from the sensor task.
 - The pressure sensor expects nominal 0.2–2.7 V for 0–40 kPa and startup auto-zero.
 - The firmware does not read the ETA6098 `STAT` output. Do not claim exact
-  charger detection from software. Preserve the charge estimator's 82 kOhm
-  ISET/500 mA, 1500 mAh CC/CV model and fast USB-removal/OCV correction.
+  charger detection from software. The fitted cell is a Power-Xtra PX103049
+  (1500 mAh label). Preserve the charge estimator's measured CC rate
+  (61.3 %/h of the OCV curve at the 82 kOhm ISET/500 mA charger) and fitted
+  CV taper, its PX103049 charge/rest map and fast USB-removal/OCV correction.
+  Refit them from a measured charge run, not from label capacity.
 - `slave1_wifi` is logical device 1, GPIO2 active-high in its default environment.
 - `slave2_ble` is logical device 2, advertises `RTCOUND20180`, GPIO4 active-low.
 

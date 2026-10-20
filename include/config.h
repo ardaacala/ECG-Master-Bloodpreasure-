@@ -56,3 +56,13 @@
 #ifndef PULSE_LED_ACTIVE_LEVEL
 #define PULSE_LED_ACTIVE_LEVEL HIGH
 #endif
+
+// BLE slave baglanti durum LED'i: BLE acik fakat slave bagli/senkron degilken
+// hizli, slave bagli ve senkronken yavas yanip soner. BLE kapaliyken (standby)
+// sonuk kalir. -1 kapali; strapping pinleri (0, 3, 45, 46) kullanilmaz.
+#ifndef BLE_STATUS_LED_PIN
+#define BLE_STATUS_LED_PIN 6
+#endif
+#ifndef BLE_STATUS_LED_ACTIVE_LEVEL
+#define BLE_STATUS_LED_ACTIVE_LEVEL HIGH
+#endif

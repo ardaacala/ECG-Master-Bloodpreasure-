@@ -17,8 +17,17 @@ BLE üzerinden okunur.
   (`PULSE_LED_PIN`). LED, slave'lerin ilk fazıyla aynı planlanmış zamanda
   150 ms yanar.
 - Ekrandaki `W:`/`B:` bağlantı şeridi seri durum satırına taşındı.
-- Basınç ölçümü, batarya tahmini, hareketle uyku/uyanma, Wi-Fi/BLE OTA ve
-  Version 3 state trigger sözleşmesi değişmedi; slave'ler aynı firmware ile çalışır.
+- GPIO6'daki BLE durum LED'i, BLE slave bağlantısını yanıp sönme hızıyla
+  gösterir (bkz. [BLE durum LED'i](#ble-durum-ledi)).
+- QMI8658 hareket sensörü kaldırıldı. Otomatik bekleme artık manşet basıncına
+  bağlıdır: 30 dakika boyunca 5 mmHg veya altı radyoları kapatır, 5 mmHg üstü
+  yeniden açar (bkz. [Basınca bağlı bekleme modu](#basınca-bağlı-bekleme-modu)).
+- Batarya göstergesi kartta kullanılan Power-Xtra PX103049 (1500 mAh) hücresinin
+  ölçümüne kalibre edildi: şarj/dinlenmiş haritası bu hücrenin 13 ölçüm çifti,
+  şarj sırasındaki yüzde ilerleyişi ise aynı koşudan fit edilen CC hızı ve CV
+  yavaşlamasıdır (bkz. [Şarj sırasında yüzde ilerleyişi](#şarj-sırasında-yüzde-ilerleyişi)).
+- Basınç ölçümü, Wi-Fi/BLE OTA ve Version 3 state trigger sözleşmesi değişmedi;
+  slave'ler aynı firmware ile çalışır.
 
 ## Version 4.1.0 şarj farkındalıklı batarya göstergesi
 
@@ -77,7 +86,8 @@ Paket yerlesimi, tekrar/ACK kurallari ve slave gelistirme notlari
   BLE Battery Service).
 - Parola korumalı Wi-Fi OTA firmware yükleme desteği.
 - PC'den parola kontrollü BLE OTA firmware yükleme desteği.
-- QMI8658 hareket algılamasıyla 5 dakika hareketsizlikte otomatik düşük güç bekleme.
+- Manşet 30 dakika boyunca 5 mmHg veya altında kalınca Wi-Fi/BLE kapanır; basınç
+  5 mmHg'yi geçince otomatik olarak yeniden açılır.
 
 ## Donanım ve pinler
 
@@ -88,12 +98,10 @@ bölüm tablosu da değiştirilmelidir.
 
 | İşlev | Pin | Yön | Not |
 |---|---|---|---|
-| Harici basınç sensörü | GPIO2 | Analog giriş | ADC1_CH1, 11 dB. 0.2–2.7 V = 0–40 kPa, 500 Hz |
+| Harici basınç sensörü | GPIO2 | Analog giriş | ADC1_CH1, 11 dB. 3.3 V besleme, 0.2–2.7 V = 0–40 kPa, 500 Hz |
 | Pil gerilimi (BAT_ADC) | GPIO4 | Analog giriş | ADC1_CH3. Bölücü oranı **×3** (`BATTERY_DIVIDER_RATIO`) |
-| QMI8658 I²C SDA | GPIO47 | Çift yönlü | 400 kHz, 3.3 V'a pull-up gerekir |
-| QMI8658 I²C SCL | GPIO48 | Çıkış | 400 kHz, 3.3 V'a pull-up gerekir |
-| QMI8658 `INT1` | GPIO8 | Dijital giriş | Aktif-yüksek, deep sleep'ten uyandırma (RTC GPIO) |
 | Yerel nabız LED'i (isteğe bağlı) | `PULSE_LED_PIN` | Dijital çıkış | Varsayılan `-1` (kapalı) |
+| BLE durum LED'i | GPIO6 (`BLE_STATUS_LED_PIN`) | Dijital çıkış | Aktif-yüksek, seri dirençle GND'ye |
 | USB D− / D+ | GPIO19 / GPIO20 | USB | Yükleme ve seri monitör, 115200 baud, USB CDC |
 
 PCB notları:
@@ -101,11 +109,10 @@ PCB notları:
 - İki analog giriş ADC1'de kalmalıdır; ADC2, Wi-Fi açıkken kullanılamaz.
 - GPIO26–32 flash'a, GPIO33–37 octal PSRAM'e ayrılmıştır. GPIO0, 3, 45 ve 46
   strapping pinleridir; LED veya başka bir çıkış için kullanmayın.
-- GPIO47/48 modülün VDD_SPI besleme alanındadır. 1.8 V'luk flash/PSRAM'li
-  modüllerde bu pinler 1.8 V olur; 3.3 V'luk bir modül seçin.
-- QMI8658 takılmazsa firmware çalışmaya devam eder, yalnızca otomatik standby
-  devre dışı kalır.
-- Pil şarj tahmini ETA6098, 82 kΩ ISET (500 mA) ve 1500 mAh hücre varsayar;
+- Hareket sensörü (IMU) ve I²C hattı yoktur; bekleme modu yalnızca GPIO2'deki
+  basınç sensörünü kullanır.
+- Pil şarj tahmini ETA6098, 82 kΩ ISET (500 mA) ve 1500 mAh Power-Xtra PX103049
+  hücresinin ölçülmüş şarj koşusunu varsayar;
   farklı şarj devresi veya pilde ilgili `BATTERY_*` sabitleri güncellenmelidir.
 
 ### Yerel nabız LED'i
@@ -123,6 +130,23 @@ LED her sentetik nabızda, slave'lerin ilk fazını belirleyen aynı planlanmı�
 `executeAt` zamanında 150 ms yanar. Basınç DIA–SYS aralığı dışındayken, OTA
 sırasında ve standby girişinde sönük kalır. Akım sınırlama direnci kullanın;
 yüksek akımlı bir yük için araya transistör veya MOSFET koyun.
+
+### BLE durum LED'i
+
+GPIO6'daki LED, master'ın BLE slave'e (`RTCOUND20180`) bağlantısını gösterir:
+
+| Durum | LED |
+|---|---|
+| BLE açık, slave bağlı değil veya henüz senkron değil | Hızlı yanıp söner (150 ms yanık / 150 ms sönük) |
+| Slave bağlı ve senkron (seri satırda `ble=OK`) | Yavaş yanıp söner (1 s yanık / 1 s sönük) |
+| BLE kapalı (açılış öncesi ve bekleme modu) | Sönük |
+
+LED Arduino döngüsünden sürülür; 500 Hz sensör görevine iş eklemez. Pin ve
+aktif seviye [`include/config.h`](include/config.h) içindeki
+`BLE_STATUS_LED_PIN` ve `BLE_STATUS_LED_ACTIVE_LEVEL` değerleridir (`-1`
+kapatır). Yanıp sönme süreleri [`src/main.cpp`](src/main.cpp) içindeki
+`BLE_LED_SEARCH_HALF_PERIOD_MS` ve `BLE_LED_SYNCED_HALF_PERIOD_MS` sabitleridir.
+LED'i seri dirençle (örneğin 330 Ω–1 kΩ) GPIO6 ile GND arasına bağlayın.
 
 Aktif topoloji:
 
@@ -157,21 +181,54 @@ kendi kartlarına yüklenmelidir. Master yalnızca `BLE_NODE_NAME` ile eşleşen
 fiziksel slave'e bağlanır; telefon kontrol uygulamasının gördüğü master reklam
 adı ise bundan bağımsız olarak `BP_TRIGGER_MASTER` kalır.
 
-## Harekete duyarlı bekleme modu
+## Basınca bağlı bekleme modu
 
-QMI8658, normal çalışmada fiziksel hareketi 10 Hz düşük güçlü ivme örnekleriyle
-izler. Her fiziksel hareket beş dakikalık sayacı baştan başlatır. Son hareketten
-itibaren beş dakika geçerse yeni tetikler engellenir, yerel nabız LED'i söner
-ve ESP32-S3 deep sleep'e girer; bu durumda iki CPU çekirdeği ile Wi-Fi/BLE
-radyo alanları kapalıdır. Yalnızca QMI8658'in 21 Hz düşük güç ivmeölçeri
-çalışır. Hareket, QMI8658 `INT1` -> GPIO8 hattıyla kartı uyandırır ve normal
-çalışma yeniden başlar. BLE'den girilen BPM/basınç aralığı RTC belleğinde
-tutulduğu için bu uyanmada kaybolmaz.
+Ekransız master'da hareket sensörü yoktur. Kullanım sinyali olarak manşet
+basıncı kullanılır.
 
-Jiroskop, QMI8658'in düşük güç ivmeölçer modunda donanım gereği kapalıdır.
-Bu, aynı hareketle uyanma işlevini daha az batarya tüketimiyle sağlar. IMU
-başlatılamazsa cihazın uyanamayacağı bir duruma girmemesi için otomatik bekleme
-devre dışı kalır.
+**Uykuya giriş:** Basınç 30 dakika boyunca 5 mmHg veya altında kalırsa yeni
+tetikler engellenir, yerel nabız LED'i söner ve son planlanmış tetik
+tamamlanır. Ardından ESP32-S3 deep sleep'e girer. Bu tek adımda Wi-Fi AP, BLE
+ve OTA kapanır. Kart 250 ms sonra radyoları açmadan uyanır ve bekleme
+döngüsüne geçer.
+
+**Bekleme döngüsü:** Kart light sleep'tedir. 250 ms'de bir uyanır, basınç
+ADC'sinden 16 örneğin ortalamasını alır ve hemen tekrar uyur. 5 mmHg sıfırın
+yalnızca ~35 mV üstüne denk geldiği için tek örnek yerine ortalama kullanılır.
+RAM korunur. Basınç sensörü beklemede de beslenmeye devam eder; bu modda
+tüketimin büyük kısmı sensörün kendi akımıdır.
+
+**Uyanma:** Ortalama 5 mmHg'yi geçtiği anda Wi-Fi AP, OTA ve BLE başlatılır,
+500 Hz sensör görevi çalışır ve slave'ler yeniden bağlanır. Basınç en geç
+~250 ms içinde algılanır. Slave'lerin bağlanıp senkronize olması birkaç saniye
+sürebilir; manşet çok hızlı şişirilirse ilk nabızlar kaçabilir.
+
+**30 dakikalık sayacı sıfırlayanlar:**
+
+- 5 mmHg üzerindeki basınç.
+- Aktif sentetik nabız (DIA 5 mmHg'nin altına ayarlanmış olsa bile).
+- Telefondan gelen her BLE komutu. Manuel tetikler manşet boşken de
+  kullanılabildiği için bu gereklidir.
+- Wi-Fi veya BLE OTA aktarımı.
+
+**Sıfır noktası:** Kart basınçlı manşetle uyandığı için başlangıçtaki otomatik
+sıfırlama tekrar yapılmaz. Manşet boşken ölçülen sıfır ve BLE'den girilen
+BPM/basınç aralığı RTC belleğinde tutulur; seri portta
+`[SENSOR] zero ... mV kept from before standby` satırı görünür. Sıfırı yeniden
+ölçmek için kartı manşet boşken reset'leyin.
+
+**USB:** Kart bir bilgisayara USB ile bağlıysa (USB SOF algılanıyorsa) light
+sleep yerine normal bekleme kullanılır. Böylece seri port ve USB yüklemesi
+açık kalır; USB beslemesinde tasarrufun önemi yoktur. Şarj adaptöründe veya
+pilde light sleep kullanılır.
+
+**Beklemedeyken:** Telefon uygulaması bağlanamaz ve OTA yapılamaz. Kartı
+uyandırmak için manşeti 5 mmHg'nin üzerine sıkın ya da reset'e basın. Reset
+normal açılış yapar, bu yüzden manşet o sırada boş olmalıdır.
+
+Eşik ve süreler [`src/main.cpp`](src/main.cpp) içindeki
+`STANDBY_PRESSURE_MMHG`, `STANDBY_TIMEOUT_MS` ve `STANDBY_CHECK_INTERVAL_MS`
+sabitleridir.
 
 ## BLE telefon kontrolü
 
@@ -262,7 +319,7 @@ kesilmemesi için bilgisayarın `ECG_MASTER` ağından ayrılmaması gerekir.
 
 BLE OTA destekli firmware ilk kez USB ile yüklenmelidir. Sonraki güncellemelerde
 bilgisayarın Bluetooth'u üzerinden, Wi-Fi ağına bağlanmadan yükleme yapılabilir.
-Cihaz beş dakikalık hareketsizlik uykusundaysa önce hareket ettirerek uyandırın.
+Cihaz bekleme modundaysa önce manşeti 5 mmHg'nin üzerine sıkarak uyandırın.
 
 ```powershell
 python -m platformio run -e esp32-s3-headless
@@ -327,42 +384,84 @@ haritasıyla telafi edilir.
 yukarı sıçrama doğrudan yüzde artışı kabul edilmez. Referans şemadaki ETA6098
 `ISET` direnci 82 kΩ'dur ve şarj akımını 500 mA'e ayarlar. Yazılım, kablo
 takılmadan önceki lookup-table SOC değerini korur; yükseliş üç ardışık ölçümle
-doğrulanınca 1500 mAh kapasite, %98 hücre coulombic verimi ve CC/CV son-dolum
-yavaşlamasıyla SOC'yi zaman üzerinden ilerletir. Böylece şarj sırasında görülen
+doğrulanınca SOC'yi ölçülmüş bir CC hızı ve CC/CV son-dolum yavaşlamasıyla zaman
+üzerinden ilerletir (bkz. [Şarj sırasında yüzde ilerleyişi](#şarj-sırasında-yüzde-ilerleyişi)). Böylece şarj sırasında görülen
 4.20 V, gerçek batarya hemen dolmuş gibi yorumlanmaz. USB çıkarıldığında 70 mV veya daha büyük
 düşüş hızlı uygulanır ve tekrar batarya-only voltaj eğrisine dönülür. Tahmini
 şarj durumu aktifken seri durum satırında `charge_est=1` görünür.
 
-Modeldeki `BATTERY_CAPACITY_MAH`, `BATTERY_CHARGE_CURRENT_MA` ve
-`BATTERY_CHARGE_COULOMBIC_EFFICIENCY` sabitleri farklı pil veya ölçülmüş şarj süresine göre
-kalibre edilebilir. Yeni/sağlıklı 1500 mAh pil varsayımı kullanılır; yaşlanma,
-sıcaklık ve gerçek kapasite nedeniyle bu yöntem fuel-gauge entegresi kadar kesin
-değildir, fakat şarj gerilimini doğrudan yüzdeye çevirmekten belirgin biçimde
-daha gerçekçidir.
+Farklı bir pil veya şarj devresinde `BATTERY_CHARGE_CC_PERCENT_PER_HOUR`,
+`batteryChargeTaperFactor()` ve `BATTERY_CHARGE_REST_MAP` o hücrenin ölçülmüş
+şarj koşusuna göre yeniden fit edilmelidir. Yaşlanma, sıcaklık ve gerçek kapasite
+nedeniyle bu yöntem fuel-gauge entegresi kadar kesin değildir, fakat şarj
+gerilimini doğrudan yüzdeye çevirmekten belirgin biçimde daha gerçekçidir.
+
+### Şarj sırasında yüzde ilerleyişi
+
+Gösterge kablo takılı değilken yüzdeyi 3.20–4.20 V OCV eğrisinden okur. Şarj
+sırasında gösterilen yüzdenin kablo çekildikten sonra aynı yere oturması için
+zaman modelinin de **bu eğrinin yüzdesi** cinsinden, hücrenin kendi hızında
+ilerlemesi gerekir. Etiket değeriyle hesap (500 mA × %98 / 1500 mAh) 32.7 %/saat
+verir; PX103049'un ölçülmüş şarj koşusunda dinlenmiş gerilimin OCV yüzdesi ise
+sabit akım bölgesinde (oturmuş 6.–10. satırlar) **61.3 %/saat** artar. Etiket
+kapasitesi, kalibre edilmemiş şarj akımı ya da genel OCV eğrisi bu oranda
+sapmaktadır; ölçüm deposu hangisi olduğunu açık bırakır (sınır 8). Firmware bu
+yüzden kapasiteden türetilmiş bir hız yerine ölçülmüş hızı kullanır
+(`BATTERY_CHARGE_CC_PERCENT_PER_HOUR`).
+
+CV yavaşlaması da aynı koşudan fit edilmiştir. Şarj/dinlenmiş farkı %55
+civarında kapanmaya başlar (139 → 51 mV) ve artış CC hızının şu oranlarına iner:
+
+| OCV yüzdesi | Ölçülen hız | Katsayı |
+|---:|---:|---:|
+| < %55 | 61.3 %/saat | 1.00 |
+| %55–66 | 42.0 %/saat | 0.69 |
+| %66–80 | 25.3 %/saat | 0.41 |
+| ≥ %80 | 8.4 %/saat | 0.14 |
+
+%89 üstü ölçülmemiştir (koşu 4140 mV'ta takılmıştır); son ölçülen katsayı
+devam eder. Harita 4100 mV'ta (~%82) bırakıldıktan sonra %100'e ~2 saat sürer.
+
+Firmware algoritması host tarafında ölçülen koşu üzerinde yeniden oynatıldı;
+gösterilen yüzde ile aynı andaki dinlenmiş gerilimin OCV yüzdesi karşılaştırıldı:
+
+| Kalibrasyon | En büyük sapma | Son nokta (%88) |
+|---|---:|---:|
+| 500 mA / 1500 mAh, eski %85/93/98 bantları | −27 puan | +2 |
+| 500 mA / 800 mAh, eski bantlar | −3 puan | +12 (%100 gösterir) |
+| **Ölçülmüş hız + fit edilmiş yavaşlama** | **−3 puan** | **0** |
+
+Fit'e katılmayan bağımsız ikinci koşuda (run2 ve run2b) sapma, tek bir −5.4
+puanlık nokta dışında 3.5 puanın içindedir. Sapma tutarlı biçimde negatiftir:
+gösterge biraz geride kalır, kablo çekilince aşağı değil yukarı oturur. Ölçüm
+düzeneğinin şarj akımı kaydedilmemiştir; ölçülen 234 mΩ iç direnç ve ~140 mV CC
+sapması ~500–600 mA'e işaret eder, bu da kartın 500 mA ISET değeriyle uyumludur.
 
 ### Şarj gerilimi → dinlenmiş gerilim haritası
 
 CC/CV zaman modelinin üstüne, ölçülmüş bir gerilim haritası tavan olarak
 uygulanır. Kaynak veri
 [`ardaacala/powerxtra-px103049-voltage-map`](https://github.com/ardaacala/powerxtra-px103049-voltage-map)
-deposundadır: kartın kullandığı Power-Xtra PX103049 (3.7 V / 1500 mAh Li-Po)
+deposundadır: kartta kullanılan Power-Xtra PX103049 (3.7 V / 1500 mAh Li-Po)
 hücresinde, şarj sürerken okunan gerilim ile şarj kesildikten 60 s sonra okunan
-gerilim 13 noktada eşleştirilmiştir.
+gerilim 13 noktada eşleştirilmiştir (deponun `measurements.csv` dosyası, ilk şarj
+koşusu). Aynı depodaki PX803035 (800 mAh, `-800mah` ekli) verisi bu hücre için
+kullanılmaz.
 
 Kablo takılıyken iç direnç ve polarizasyon BAT_ADC'yi açık devre geriliminin
 belirgin biçimde üstüne taşır: sabit akım boyunca ~140 mV, şarj sabit gerilime
-geçip akım azaldıkça ~51 mV. Ham gerilimi doğrudan OCV eğrisine vermek, yarı boş
-bir hücreyi neredeyse dolu göstermenin sebebidir. Firmware bu yüzden önce şarj
-gerilimini dinlenmiş karşılığına çevirir, sonra mevcut 3.20–4.20 V eğrisinden
-yüzdeye geçer:
+geçip akım azaldıkça ~51 mV. Ham gerilimi doğrudan OCV eğrisine vermek,
+yarı boş bir hücreyi neredeyse dolu göstermenin sebebidir. Firmware bu yüzden
+önce şarj gerilimini dinlenmiş karşılığına çevirir, sonra mevcut 3.20–4.20 V
+eğrisinden yüzdeye geçer (değerler firmware'in tamsayı hesabıyla):
 
 | Şarjda okunan | Ham eğri | Haritalı | Fark |
 |---:|---:|---:|---:|
-| 3650 mV | %28 | %11 | 17 puan |
-| 3721 mV | %38 | %18 | 20 puan |
+| 3650 mV | %27 | %10 | 17 puan |
+| 3721 mV | %38 | %17 | 21 puan |
 | 3900 mV | %65 | %44 | 21 puan |
 | 4020 mV | %82 | %66 | 16 puan |
-| 4100 mV | %90 | %83 | 7 puan |
+| 4100 mV | %90 | %82 | 8 puan |
 
 `BATTERY_CHARGE_REST_MAP` içindeki 13 ölçüm çifti, deponun 10 mV adımlı
 `lookup.csv` tablosunu 0.05 mV içinde yeniden üretir; ölçülen 3426–4140 mV
@@ -371,16 +470,16 @@ aralığının dışına **ekstrapolasyon yapılmaz**.
 Harita gösterilen değerin kendisi değil, **tavanıdır**. Görünen eğriyi hâlâ CC/CV
 zaman modeli çizer; harita yalnızca modelin hücrenin kendi geriliminin
 desteklediğinden ileri gitmesini engeller. Bunun iki sebebi var: kaynak ölçümde
-her nokta yalnızca 60 s dinlendirildiği için 3.35–3.52 V aralığındaki dinlenmiş
-değerler bir miktar yüksek kalmıştır, ve veri oda sıcaklığında tek bir hücrenin
-tek koşusudur. Şarj oturumu boyunca ayrıca bir taban tutulur; gösterge kablo
-takılıyken hiçbir zaman geri adım atmaz.
+her nokta yalnızca 60 s dinlendirilmiştir, bu yüzden 3.35–3.52 V aralığındaki
+dinlenmiş değerler bir miktar yüksek kalmıştır; ayrıca veri oda sıcaklığında tek
+bir hücrenin tek koşusudur. Şarj oturumu boyunca
+ayrıca bir taban tutulur; gösterge kablo takılıyken hiçbir zaman geri adım atmaz.
 
 `BATTERY_CHARGE_MAP_RELEASE_MV` (4100 mV) üzerinde tavan bırakılır: bu noktadan
 sonra ETA6098 sabit gerilim aşamasındadır, gerilimi şarj IC'si sabitler ve artık
 doluluğu takip etmez. Son bölümü CC/CV modeli tek başına %100'e taşır. Eşik,
-kaynak koşunun takıldığı 4140 mV platosunun bir harita adımı altındadır; aradaki
-pay, aynı koşunun belgelediği ±20–30 mV mutlak ADC kaymasını karşılar.
+kaynak koşunun takıldığı 4140 mV platosunun bir harita adımı altındadır; aynı
+koşunun belgelediği ±20–30 mV mutlak ADC kaymasına pay bırakır.
 
 ### İkinci şarj tespiti: sürekli yükseliş
 
@@ -390,7 +489,7 @@ açılırsa ortada yakalanacak bir adım yoktur.** O durumda şarj modu hiç dev
 girmez, yüzde ham şarj geriliminden hesaplanır ve gereğinden yüksek görünür.
 
 İkinci bir yol bu boşluğu donanım eklemeden kapatır. Dayandığı fizik şu: sabit
-akım şarjı bu hücreyi her beş dakikada 30–45 mV yukarı taşır ve bunu saatlerce
+akım şarjı bu paketi her beş dakikada 30–45 mV yukarı taşır ve bunu saatlerce
 sürdürür; buna karşılık yük kalktığında oluşan dinlenme toparlanması bir iki
 dakikada biter ve düzleşir. Ayırt edici olan tek bir yükseliş değil, yükselişin
 **sürmesi**.
@@ -411,13 +510,16 @@ okunur.
 
 Doğrulama host tarafında dokuz senaryoyla yapıldı: soğuk açılış, dinlenme
 toparlanması, normal kablo takma regresyonu, normal deşarj, ±8 mV ADC gürültüsü,
-kablo çıkarma, yetmeden kesilen yükseliş ve yavaş toparlanma. Soğuk açılış
-senaryosunda gösterge %38'den başlayıp haritanın işaret ettiği %36'ya iniyor;
-aynı noktada ham eğri %65 derdi.
+kablo çıkarma, yetmeden kesilen yükseliş ve yavaş toparlanma. Bu doğrulama
+1500 mAh PX103049 haritasıyla, ölçülmüş şarj hızından önceki zaman modeliyle
+yapılmıştır; soğuk açılış senaryosunda gösterge %38'den başlayıp haritanın işaret
+ettiği %36'ya iniyordu, aynı noktada ham eğri %65 derdi. Ölçülmüş hız ve CV
+yavaşlamasıyla bu dokuz senaryo yeniden koşulmadı; şarj ilerleyişi yukarıdaki
+oynatmayla doğrulandı.
 
 **Bilinen sınır:** cihaz şarjın sabit gerilim kuyruğundayken (>4100 mV) açılırsa
 artış hızı eşiğin altında kalır ve bu yol tetiklenmez. Orada sapma zaten küçüktür
-— ham eğri %94, gerçek ~%89. Kesin çözüm için VBUS veya `STAT` hattının bir
+— ham eğri %94, gerçek ~%88. Kesin çözüm için VBUS veya `STAT` hattının bir
 GPIO'ya bağlanması gerekir.
 
 Firmware ETA6098 `STAT` çıkışını okumaz; yazılım yalnızca BAT_ADC ile şarj
@@ -429,8 +531,8 @@ GPIO'ya bağlanırsa, kullanılabilmesi için ayrıca firmware desteği gerekir.
 
 ## Proje yapısı
 
-- `src/main.cpp`: ADC, sahte nabız, yerel nabız LED'i, hareketle uyku, seri
-  durum satırı ve görev dağılımı.
+- `src/main.cpp`: ADC, sahte nabız, yerel nabız LED'i, BLE durum LED'i,
+  basınca bağlı bekleme, seri durum satırı ve görev dağılımı.
 - `src/ui_compat.cpp`: Wi-Fi modülünün eski UI çağrıları için boş uyumluluk
   fonksiyonları.
 - `src/wifi_master.cpp`: Wi-Fi AP, TCP slave ve saat senkronizasyonu.

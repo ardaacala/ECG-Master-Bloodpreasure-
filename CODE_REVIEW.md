@@ -19,11 +19,14 @@ Her değişiklikten sonra aşağıdakileri kontrol edin:
 - BLE adı master ve `slave2_ble` içinde aynı mı (`RTCOUND20180`)?
 - Wi-Fi ve BLE packed paket boyutları karşı uçlarla aynı mı?
 - GPIO2 basınç sensörü ve GPIO4 BAT_ADC çakışmadan korunuyor mu?
-- QMI8658 GPIO47/48 I²C hattı veya GPIO8 uyandırma hattı değiştirilmiş mi?
-- `PULSE_LED_PIN` strapping pinlerine (0, 3, 45, 46) atanmış mı?
+- Basınca bağlı standby: 30 dk ≤ 5 mmHg eşiği, telefon/OTA ile sayaç sıfırlama,
+  uyanmada otomatik sıfırlamanın atlanması ve RTC'deki sıfır korunuyor mu?
+- `PULSE_LED_PIN` veya `BLE_STATUS_LED_PIN` strapping pinlerine (0, 3, 45, 46) atanmış mı?
+- BLE durum LED'i senkronsuzken hızlı, senkronken yavaş yanıp sönüyor; standby'da sönük mü?
 - Sensör görevine flash, ağ, uzun seri çıktı veya busy-loop eklendi mi?
 - Gerçek parola içeren hiçbir `secrets.h` Git'e eklenmiş mi?
-- Şarj SOC'si pre-charge değerden 500 mA/1500 mAh modele göre mi ilerliyor;
+- Şarj SOC'si pre-charge değerden PX103049 koşusundan ölçülen 61.3 %/saat CC
+  hızı ve fit edilmiş CV yavaşlamasıyla (%55/66/80 bantları) mı ilerliyor;
   USB çıkışı yeniden OCV lookup değerine hızlı dönüyor mu?
 
 Donanım yüklemesinde ESP32-S3 master portunu VID:PID `303A:1001` ile doğrulayın;

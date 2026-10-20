@@ -9,16 +9,40 @@
   (`PULSE_LED_PIN`, varsayilan `-1` kapali). LED, slave'lerin ilk fazini
   belirleyen ayni planlanmis `executeAt` zamaninda 150 ms yanar; 500 Hz sensor
   gorevinde surulur, aralik disinda, OTA sirasinda ve standby girisinde sonuk kalir.
+- GPIO6'ya BLE durum LED'i eklenir (`BLE_STATUS_LED_PIN`): BLE acik fakat
+  slave bagli/senkron degilken 150 ms, slave senkronken 1 s aralikla yanip
+  soner; BLE kapaliyken (acilis oncesi, standby) sonuk kalir. Arduino
+  dongusunden surulur, sensor gorevine is eklemez.
 - Ekrandaki `W:`/`B:` baglanti seridi seri durum satirina tasinir
   (`wifi=OK|SYNC|OFF ble=OK|SYNC|OFF`); `ui_fps`, `ui_age`, `ui_max` ve `fake`
   alanlari kaldirilir, sentetik nabzin aktif oldugunu gosteren `pulse=` eklenir.
-- QMI8658 hareketle uyandirma korunur; I2C hatti artik yalnizca IMU icindir
-  (GPIO47/48, INT1 GPIO8). IMU bulunamazsa yalnizca otomatik standby kapanir.
-  Standby'da saklanan RTC ayarlarindan tema alani cikar ve magic degeri degisir.
+- QMI8658 hareket sensoru ve I2C kodu kaldirilir; GPIO8/47/48 bos kalir.
+  Otomatik standby artik manset basincina baglidir: basinc 30 dakika boyunca
+  5 mmHg veya altinda kalirsa deep sleep ile Wi-Fi/BLE/OTA kapanir. Kart
+  radyolari acmadan uyanir, 250 ms aralikla light sleep'ten 16 orneklik
+  ortalama basinci kontrol eder ve 5 mmHg ustunde normal acilisa devam eder.
+  USB ile bilgisayara bagliyken light sleep yerine normal bekleme kullanilir.
+- Telefon BLE komutu, aktif sentetik nabiz ve OTA aktarimi standby sayacini
+  sifirlar.
+- Bos manset sifiri, BPM ve basinc araligi RTC bellekte tutulur; standby
+  uyanmasinda otomatik sifirlama tekrarlanmaz. Tema alani cikar, sifir alanlari
+  eklenir ve magic degeri degisir.
 - PlatformIO ortamlari `esp32-s3-headless` ve `esp32-s3-headless-ota` olarak
   yeniden adlandirilir; BLE OTA aracinin varsayilan `firmware.bin` yolu buna
   gore guncellenir.
-- Basinc sensoru, batarya tahmini, Version 3 state trigger paket sozlesmesi,
+- Sarj sirasindaki yuzde ilerleyisi Power-Xtra PX103049 (1500 mAh) hucresinin
+  olculmus sarj kosusuna kalibre edilir. Etiket kapasitesinden turetilen
+  500 mA x 0.98 / 1500 mAh hizi (32.7 %/saat) yerine kosudan fit edilen
+  61.3 %/saat CC hizi kullanilir (`BATTERY_CHARGE_CC_PERCENT_PER_HOUR`);
+  `BATTERY_CAPACITY_MAH`, `BATTERY_CHARGE_CURRENT_MA` ve
+  `BATTERY_CHARGE_COULOMBIC_EFFICIENCY` kaldirilir. CV yavaslamasi %85/93/98
+  yerine olculen %55/66/80 bantlarinda 0.69/0.41/0.14 katsayilarina gecer.
+  Firmware algoritmasinin olculen kosu uzerinde host'ta yeniden oynatilmasinda
+  gosterilen yuzde ile dinlenmis OCV yuzdesi arasindaki en buyuk fark 27
+  puandan 3 puana iner; bagimsiz ikinci kosuda tek bir 5.4 puanlik nokta
+  disinda 3.5 puanin icindedir. PX103049 sarj/dinlenmis haritasi (13 cift,
+  3426-4140 mV), 4100 mV harita birakma esigi ve OCV egrisi degismez.
+- Basinc sensoru, Version 3 state trigger paket sozlesmesi,
   BLE/Wi-Fi davranisi ve slave yazilimlari degismez.
 
 ## 4.1.0 - 2026-09-15
